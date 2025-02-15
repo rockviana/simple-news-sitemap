@@ -42,7 +42,8 @@ class Simple_News_Sitemap {
             'cloudflare_api_key' => '',
             'cloudflare_zone_id' => '',
             'enable_siteground' => true,
-            'last_update' => ''
+            'last_update' => '',
+            'generation_log' => []
         ]);
 
         add_action('init', [$this, 'init']);
@@ -52,6 +53,23 @@ class Simple_News_Sitemap {
         add_action('delete_post', [$this, 'handle_post_update']);
         add_action('add_meta_boxes', [$this, 'add_exclude_meta_box']);
         add_action('save_post', [$this, 'save_exclude_meta']);
+        add_action('admin_post_generate_sitemap_now', [$this, 'handle_manual_generation']);
+    }
+
+    public function handle_manual_generation() {
+        if (!current_user_can('manage_options')) {
+            wp_die('Acesso negado');
+        }
+
+        check_admin_referer('generate_sitemap_now');
+        
+        $this->generate_sitemap();
+        
+        wp_redirect(add_query_arg(
+            ['page' => 'simple-news-sitemap', 'generated' => '1'],
+            admin_url('options-general.php')
+        ));
+        exit;
     }
 
     public function init() {
@@ -235,6 +253,10 @@ class Simple_News_Sitemap {
             <h1><?php echo esc_html(get_admin_page_title()); ?></h1>
             
             <?php
+            if (isset($_GET['generated'])) {
+                echo '<div class="notice notice-success"><p>Sitemap gerado com sucesso!</p></div>';
+            }
+
             $sitemap_url = home_url('/news-sitemap.xml');
             $last_update = !empty($this->options['last_update']) ? 
                           wp_date('d/m/Y H:i:s', strtotime($this->options['last_update'])) : 
@@ -253,7 +275,35 @@ class Simple_News_Sitemap {
                     <strong>Última Atualização:</strong> 
                     <?php echo esc_html($last_update); ?>
                 </p>
+                <p>
+                    <form action="<?php echo esc_url(admin_url('admin-post.php')); ?>" method="post" style="display: inline;">
+                        <?php wp_nonce_field('generate_sitemap_now'); ?>
+                        <input type="hidden" name="action" value="generate_sitemap_now">
+                        <button type="submit" class="button button-secondary">
+                            <span class="dashicons dashicons-update" style="vertical-align: middle;"></span>
+                            Gerar Sitemap Agora
+                        </button>
+                    </form>
+                </p>
             </div>
+
+            <?php if (!empty($this->options['generation_log'])): ?>
+                <div class="card" style="max-width: 100%;">
+                    <h2>Log de Geração do Sitemap</h2>
+                    <div style="max-height: 300px; overflow-y: auto; padding: 10px; background: #f8f9fa; border: 1px solid #ddd;">
+                        <?php foreach (array_reverse($this->options['generation_log']) as $log): ?>
+                            <p style="margin: 5px 0; padding: 5px; border-bottom: 1px solid #eee;">
+                                <strong>[<?php echo esc_html(wp_date('d/m/Y H:i:s', strtotime($log['time']))); ?>]</strong>
+                                <?php echo esc_html($log['message']); ?>
+                                <?php if (isset($log['count'])): ?>
+                                    <br>
+                                    <small>Posts incluídos: <?php echo intval($log['count']); ?></small>
+                                <?php endif; ?>
+                            </p>
+                        <?php endforeach; ?>
+                    </div>
+                </div>
+            <?php endif; ?>
 
             <form action="options.php" method="post">
                 <?php
@@ -379,6 +429,9 @@ class Simple_News_Sitemap {
     }
 
     public function generate_sitemap() {
+        $start_time = microtime(true);
+        $posts_count = 0;
+
         $xml = new DOMDocument('1.0', 'UTF-8');
         $xml->formatOutput = true;
 
@@ -386,7 +439,7 @@ class Simple_News_Sitemap {
         $urlset->setAttributeNS('http://www.w3.org/2000/xmlns/', 'xmlns:news', 'http://www.google.com/schemas/sitemap-news/0.9');
         $xml->appendChild($urlset);
 
-        // Buscar posts das últimas 48 horas
+        // Buscar posts das últimas 24 horas
         $args = [
             'post_type' => 'post',
             'post_status' => 'publish',
@@ -394,7 +447,7 @@ class Simple_News_Sitemap {
             'category__in' => isset($this->options['categories']) ? $this->options['categories'] : [],
             'date_query' => [
                 [
-                    'after' => '48 hours ago',
+                    'after' => '24 hours ago',
                     'inclusive' => true,
                 ]
             ],
@@ -448,10 +501,32 @@ class Simple_News_Sitemap {
 
                 $url->appendChild($news);
                 $urlset->appendChild($url);
+                $posts_count++;
             }
         }
         
         wp_reset_postdata();
+
+        // Calcular tempo de execução
+        $execution_time = round(microtime(true) - $start_time, 2);
+
+        // Preparar mensagem de log
+        $log_message = sprintf(
+            'Sitemap gerado em %s segundos. %s',
+            $execution_time,
+            $posts_count > 0 ? '' : 'Nenhum post encontrado nas últimas 24 horas.'
+        );
+
+        // Manter apenas os últimos 50 logs
+        $this->options['generation_log'][] = [
+            'time' => current_time('mysql'),
+            'message' => $log_message,
+            'count' => $posts_count
+        ];
+
+        if (count($this->options['generation_log']) > 50) {
+            $this->options['generation_log'] = array_slice($this->options['generation_log'], -50);
+        }
 
         // Atualizar a hora da última geração
         $this->options['last_update'] = current_time('mysql');
