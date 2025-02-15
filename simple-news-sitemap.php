@@ -85,7 +85,13 @@ class Simple_News_Sitemap {
     }
 
     public function register_settings() {
-        register_setting('simple_news_sitemap', 'simple_news_sitemap_options');
+        register_setting(
+            'simple_news_sitemap',
+            'simple_news_sitemap_options',
+            [
+                'sanitize_callback' => [$this, 'sanitize_options']
+            ]
+        );
         
         add_settings_section(
             'simple_news_sitemap_section',
@@ -109,6 +115,13 @@ class Simple_News_Sitemap {
             'simple-news-sitemap',
             'simple_news_sitemap_section'
         );
+    }
+
+    public function sanitize_options($input) {
+        $input['categories'] = array_map('intval', $input['categories']);
+        $input['max_news'] = intval($input['max_news']);
+        $this->generate_sitemap();
+        return $input;
     }
 
     public function categories_callback() {
