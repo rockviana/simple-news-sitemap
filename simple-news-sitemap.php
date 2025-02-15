@@ -77,13 +77,39 @@ class Simple_News_Sitemap {
 
         check_admin_referer('generate_sitemap_now');
         
-        $this->generate_sitemap();
-        
-        wp_redirect(add_query_arg(
-            ['page' => 'simple-news-sitemap', 'generated' => '1'],
-            admin_url('options-general.php')
-        ));
-        exit;
+        try {
+            // Limpar cache antes de gerar
+            wp_cache_delete($this->cache_key, $this->cache_group);
+            
+            // Gerar sitemap
+            $xml = $this->generate_sitemap();
+            
+            if ($xml) {
+                // Limpar caches
+                $this->clear_sitemap_cache();
+                
+                wp_redirect(add_query_arg(
+                    ['page' => 'simple-news-sitemap', 'generated' => '1'],
+                    admin_url('options-general.php')
+                ));
+                exit;
+            } else {
+                throw new Exception('Erro ao gerar o XML do sitemap');
+            }
+        } catch (Exception $e) {
+            $this->add_to_log([
+                'time' => current_time('mysql'),
+                'message' => 'Erro: ' . $e->getMessage(),
+                'count' => 0,
+                'execution_time' => 0
+            ]);
+            
+            wp_redirect(add_query_arg(
+                ['page' => 'simple-news-sitemap', 'error' => urlencode($e->getMessage())],
+                admin_url('options-general.php')
+            ));
+            exit;
+        }
     }
 
     public function init() {
@@ -282,7 +308,12 @@ class Simple_News_Sitemap {
             
             <?php
             if (isset($_GET['generated'])) {
-                echo '<div class="notice notice-success"><p>Sitemap gerado com sucesso!</p></div>';
+                echo '<div class="notice notice-success is-dismissible"><p>Sitemap gerado com sucesso!</p></div>';
+            }
+            
+            if (isset($_GET['error'])) {
+                $error = sanitize_text_field(urldecode($_GET['error']));
+                echo '<div class="notice notice-error is-dismissible"><p>Erro ao gerar sitemap: ' . esc_html($error) . '</p></div>';
             }
 
             $sitemap_url = home_url('/news-sitemap.xml');
@@ -307,7 +338,7 @@ class Simple_News_Sitemap {
                     <form action="<?php echo esc_url(admin_url('admin-post.php')); ?>" method="post" style="display: inline;">
                         <?php wp_nonce_field('generate_sitemap_now'); ?>
                         <input type="hidden" name="action" value="generate_sitemap_now">
-                        <button type="submit" class="button button-secondary">
+                        <button type="submit" class="button button-secondary" id="generate-sitemap-btn">
                             <span class="dashicons dashicons-update" style="vertical-align: middle;"></span>
                             Gerar Sitemap Agora
                         </button>
@@ -319,13 +350,25 @@ class Simple_News_Sitemap {
                 <div class="card" style="max-width: 100%;">
                     <h2>Log de Geração do Sitemap</h2>
                     <div style="max-height: 300px; overflow-y: auto; padding: 10px; background: #f8f9fa; border: 1px solid #ddd;">
-                        <?php foreach (array_reverse($this->options['generation_log']) as $log): ?>
+                        <?php 
+                        $logs = array_reverse($this->options['generation_log']);
+                        foreach ($logs as $log): 
+                            $message = is_array($log) ? $log['message'] : $log;
+                            $time = is_array($log) ? $log['time'] : current_time('mysql');
+                            $count = isset($log['count']) ? $log['count'] : null;
+                            $execution_time = isset($log['execution_time']) ? $log['execution_time'] : null;
+                        ?>
                             <p style="margin: 5px 0; padding: 5px; border-bottom: 1px solid #eee;">
-                                <strong>[<?php echo esc_html(wp_date('d/m/Y H:i:s', strtotime($log['time']))); ?>]</strong>
-                                <?php echo esc_html($log['message']); ?>
-                                <?php if (isset($log['count'])): ?>
+                                <strong>[<?php echo esc_html(wp_date('d/m/Y H:i:s', strtotime($time))); ?>]</strong>
+                                <?php echo esc_html($message); ?>
+                                <?php if ($count !== null): ?>
                                     <br>
-                                    <small>Posts incluídos: <?php echo intval($log['count']); ?></small>
+                                    <small>
+                                        Posts incluídos: <?php echo intval($count); ?>
+                                        <?php if ($execution_time !== null): ?>
+                                            | Tempo de execução: <?php echo number_format($execution_time, 2); ?>s
+                                        <?php endif; ?>
+                                    </small>
                                 <?php endif; ?>
                             </p>
                         <?php endforeach; ?>
@@ -333,13 +376,15 @@ class Simple_News_Sitemap {
                 </div>
             <?php endif; ?>
 
-            <form action="options.php" method="post">
-                <?php
-                settings_fields('simple_news_sitemap');
-                do_settings_sections('simple-news-sitemap');
-                submit_button();
-                ?>
-            </form>
+            <script>
+            jQuery(document).ready(function($) {
+                $('#generate-sitemap-btn').click(function() {
+                    $(this).prop('disabled', true)
+                           .find('.dashicons')
+                           .addClass('dashicons-update-spin');
+                });
+            });
+            </script>
         </div>
         <?php
     }
