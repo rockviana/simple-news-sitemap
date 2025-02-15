@@ -26,6 +26,8 @@ class Simple_News_Sitemap {
     private $cache_key = 'simple_news_sitemap_xml_cache';
     private $cache_group = 'simple_news_sitemap';
     private $cache_expiration = 300; // 5 minutos
+    private $log_file;
+    private $max_log_size = 5242880; // 5MB
 
     public static function get_instance() {
         if (null === self::$instance) {
@@ -37,6 +39,7 @@ class Simple_News_Sitemap {
     private function __construct() {
         $this->site_url = get_site_url();
         $this->sitemap_path = ABSPATH . 'news-sitemap.xml';
+        $this->log_file = WP_CONTENT_DIR . '/simple-news-sitemap.log';
         $this->options = get_option('simple_news_sitemap_options', [
             'categories' => [],
             'max_news' => 50,
@@ -46,7 +49,8 @@ class Simple_News_Sitemap {
             'cloudflare_zone_id' => '',
             'enable_siteground' => true,
             'last_update' => '',
-            'generation_log' => []
+            'generation_log' => [],
+            'debug_mode' => false
         ]);
 
         // Inicializar cache
@@ -62,54 +66,15 @@ class Simple_News_Sitemap {
         add_action('add_meta_boxes', [$this, 'add_exclude_meta_box']);
         add_action('save_post', [$this, 'save_exclude_meta']);
         add_action('admin_post_generate_sitemap_now', [$this, 'handle_manual_generation']);
+        
+        // Adicionar endpoint AJAX
+        add_action('wp_ajax_check_sitemap_progress', [$this, 'ajax_check_progress']);
 
         // Adicionar schedule para limpeza de logs antigos
         if (!wp_next_scheduled('simple_news_sitemap_cleanup')) {
             wp_schedule_event(time(), 'daily', 'simple_news_sitemap_cleanup');
         }
         add_action('simple_news_sitemap_cleanup', [$this, 'cleanup_old_logs']);
-    }
-
-    public function handle_manual_generation() {
-        if (!current_user_can('manage_options')) {
-            wp_die('Acesso negado');
-        }
-
-        check_admin_referer('generate_sitemap_now');
-        
-        try {
-            // Limpar cache antes de gerar
-            wp_cache_delete($this->cache_key, $this->cache_group);
-            
-            // Gerar sitemap
-            $xml = $this->generate_sitemap();
-            
-            if ($xml) {
-                // Limpar caches
-                $this->clear_sitemap_cache();
-                
-                wp_redirect(add_query_arg(
-                    ['page' => 'simple-news-sitemap', 'generated' => '1'],
-                    admin_url('options-general.php')
-                ));
-                exit;
-            } else {
-                throw new Exception('Erro ao gerar o XML do sitemap');
-            }
-        } catch (Exception $e) {
-            $this->add_to_log([
-                'time' => current_time('mysql'),
-                'message' => 'Erro: ' . $e->getMessage(),
-                'count' => 0,
-                'execution_time' => 0
-            ]);
-            
-            wp_redirect(add_query_arg(
-                ['page' => 'simple-news-sitemap', 'error' => urlencode($e->getMessage())],
-                admin_url('options-general.php')
-            ));
-            exit;
-        }
     }
 
     public function init() {
@@ -476,101 +441,197 @@ class Simple_News_Sitemap {
     }
 
     public function generate_sitemap() {
-        global $wpdb;
         $start_time = microtime(true);
-        $posts_count = 0;
+        $this->log_message("Iniciando geração do sitemap");
 
-        $xml = new DOMDocument('1.0', 'UTF-8');
-        $xml->formatOutput = true;
+        try {
+            $args = [
+                'post_type' => 'post',
+                'post_status' => 'publish',
+                'posts_per_page' => $this->options['max_news'],
+                'orderby' => 'date',
+                'order' => 'DESC',
+                'no_found_rows' => true, // Otimização de performance
+                'update_post_term_cache' => false, // Otimização de performance
+                'update_post_meta_cache' => false, // Otimização de performance
+            ];
 
-        $urlset = $xml->createElementNS('http://www.sitemaps.org/schemas/sitemap/0.9', 'urlset');
-        $urlset->setAttributeNS('http://www.w3.org/2000/xmlns/', 'xmlns:news', 'http://www.google.com/schemas/sitemap-news/0.9');
-        $xml->appendChild($urlset);
-
-        // Query otimizada usando SQL direto
-        $categories = array_map('intval', $this->options['categories']);
-        $categories_in = empty($categories) ? '' : "AND tt.term_id IN (" . implode(',', $categories) . ")";
-        
-        $query = $wpdb->prepare(
-            "SELECT DISTINCT p.ID, p.post_title, p.post_date_gmt, p.guid 
-            FROM {$wpdb->posts} p
-            LEFT JOIN {$wpdb->term_relationships} tr ON (p.ID = tr.object_id)
-            LEFT JOIN {$wpdb->term_taxonomy} tt ON (tr.term_taxonomy_id = tt.term_taxonomy_id)
-            WHERE p.post_type = 'post' 
-            AND p.post_status = 'publish'
-            AND p.post_date_gmt > %s
-            {$categories_in}
-            ORDER BY p.post_date_gmt DESC
-            LIMIT %d",
-            gmdate('Y-m-d H:i:s', strtotime('-24 hours')),
-            intval($this->options['max_news'])
-        );
-
-        $posts = $wpdb->get_results($query);
-
-        if ($posts) {
-            // Pré-carregar meta dados em massa
-            $post_ids = wp_list_pluck($posts, 'ID');
-            update_meta_cache('post', $post_ids);
-
-            foreach ($posts as $post) {
-                if (get_post_meta($post->ID, '_simple_news_sitemap_exclude', true)) {
-                    continue;
-                }
-
-                $url = $xml->createElement('url');
-                
-                $loc = $xml->createElement('loc');
-                $loc->appendChild($xml->createTextNode(get_permalink($post->ID)));
-                $url->appendChild($loc);
-
-                $news = $xml->createElement('news:news');
-                
-                $publication = $xml->createElement('news:publication');
-                
-                $name = $xml->createElement('news:name');
-                $name->appendChild($xml->createTextNode('Central da Toca'));
-                $publication->appendChild($name);
-                
-                $language = $xml->createElement('news:language');
-                $language->appendChild($xml->createTextNode('pt-BR'));
-                $publication->appendChild($language);
-                
-                $news->appendChild($publication);
-
-                $pub_date = $xml->createElement('news:publication_date');
-                $pub_date->appendChild($xml->createTextNode(mysql2date('c', $post->post_date_gmt)));
-                $news->appendChild($pub_date);
-
-                $title = $xml->createElement('news:title');
-                $title->appendChild($xml->createTextNode(html_entity_decode($post->post_title, ENT_QUOTES, 'UTF-8')));
-                $news->appendChild($title);
-
-                $url->appendChild($news);
-                $urlset->appendChild($url);
-                $posts_count++;
+            if (!empty($this->options['categories'])) {
+                $args['category__in'] = $this->options['categories'];
             }
+
+            $posts = get_posts($args);
+            $count = count($posts);
+            
+            $this->log_message("Encontrados {$count} posts para incluir no sitemap");
+
+            $xml = $this->generate_xml_content($posts);
+            
+            if ($this->save_sitemap_file($xml)) {
+                $execution_time = round(microtime(true) - $start_time, 2);
+                $this->log_message("Sitemap gerado com sucesso em {$execution_time} segundos");
+                
+                $this->add_to_log([
+                    'time' => current_time('mysql'),
+                    'message' => "Sitemap gerado com sucesso",
+                    'count' => $count,
+                    'execution_time' => $execution_time
+                ]);
+                
+                return $xml;
+            }
+            
+            throw new Exception('Erro ao salvar o arquivo do sitemap');
+        } catch (Exception $e) {
+            $this->log_message("Erro na geração do sitemap: " . $e->getMessage(), 'error');
+            throw $e;
+        }
+    }
+
+    private function generate_xml_content($posts) {
+        $start_time = microtime(true);
+        $this->log_message("Iniciando geração do conteúdo XML");
+        
+        $xml = '<?xml version="1.0" encoding="UTF-8"?>' . PHP_EOL;
+        $xml .= '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:news="http://www.google.com/schemas/sitemap-news/0.9">' . PHP_EOL;
+        
+        foreach ($posts as $post) {
+            if (get_post_meta($post->ID, '_simple_news_sitemap_exclude', true)) {
+                continue;
+            }
+            
+            $xml .= $this->generate_url_entry($post);
+        }
+        
+        $xml .= '</urlset>';
+        
+        $execution_time = round(microtime(true) - $start_time, 2);
+        $this->log_message("XML gerado em {$execution_time} segundos");
+        
+        return $xml;
+    }
+
+    private function log_message($message, $level = 'info') {
+        if (!$this->options['debug_mode'] && $level !== 'error') {
+            return;
         }
 
-        $execution_time = round(microtime(true) - $start_time, 2);
+        $timestamp = date('Y-m-d H:i:s');
+        $log_entry = "[{$timestamp}] [{$level}] {$message}" . PHP_EOL;
         
-        $log_message = sprintf(
-            'Sitemap gerado em %s segundos. %s',
-            $execution_time,
-            $posts_count > 0 ? '' : 'Nenhum post encontrado nas últimas 24 horas.'
-        );
+        // Rotacionar log se necessário
+        if (file_exists($this->log_file) && filesize($this->log_file) > $this->max_log_size) {
+            $this->rotate_log_file();
+        }
+        
+        file_put_contents($this->log_file, $log_entry, FILE_APPEND);
+        
+        // Enviar para o admin se estiver gerando manualmente
+        if (defined('DOING_AJAX') && DOING_AJAX) {
+            wp_send_json(['status' => 'running', 'message' => $message]);
+        }
+    }
 
-        $this->add_to_log([
-            'time' => current_time('mysql'),
-            'message' => $log_message,
-            'count' => $posts_count,
-            'execution_time' => $execution_time
-        ]);
+    private function rotate_log_file() {
+        $backup_file = $this->log_file . '.1';
+        if (file_exists($this->log_file)) {
+            rename($this->log_file, $backup_file);
+        }
+    }
 
-        $this->options['last_update'] = current_time('mysql');
-        update_option('simple_news_sitemap_options', $this->options);
+    public function admin_page() {
+        if (!current_user_can('manage_options')) {
+            return;
+        }
+        
+        $logs = $this->get_recent_logs();
+        ?>
+        <div class="wrap">
+            <h1>Simple News Sitemap</h1>
+            
+            <form method="post" action="options.php">
+                <?php
+                settings_fields('simple_news_sitemap');
+                do_settings_sections('simple_news_sitemap');
+                submit_button();
+                ?>
+            </form>
+            
+            <h2>Gerar Sitemap</h2>
+            <form method="post" action="<?php echo admin_url('admin-post.php'); ?>">
+                <?php wp_nonce_field('generate_sitemap_now'); ?>
+                <input type="hidden" name="action" value="generate_sitemap_now">
+                <p>
+                    <button type="submit" class="button button-primary" id="generate-sitemap">
+                        Gerar Sitemap Agora
+                    </button>
+                </p>
+            </form>
+            
+            <div id="generation-log" style="display: none;">
+                <h3>Log de Geração em Tempo Real</h3>
+                <pre id="log-content" style="background: #f1f1f1; padding: 10px; max-height: 200px; overflow-y: auto;"></pre>
+            </div>
 
-        return $xml->saveXML();
+            <h3>Logs Recentes</h3>
+            <div style="background: #f1f1f1; padding: 10px; max-height: 400px; overflow-y: auto;">
+                <pre><?php echo esc_html($this->get_log_contents()); ?></pre>
+            </div>
+            
+            <script>
+            jQuery(document).ready(function($) {
+                $('#generate-sitemap').click(function(e) {
+                    e.preventDefault();
+                    var $button = $(this);
+                    var $log = $('#generation-log');
+                    var $logContent = $('#log-content');
+                    
+                    $button.prop('disabled', true);
+                    $log.show();
+                    $logContent.html('Iniciando geração do sitemap...\n');
+                    
+                    function checkProgress() {
+                        $.ajax({
+                            url: ajaxurl,
+                            data: {
+                                action: 'check_sitemap_progress'
+                            },
+                            success: function(response) {
+                                if (response.status === 'running') {
+                                    $logContent.append(response.message + '\n');
+                                    $logContent.scrollTop($logContent[0].scrollHeight);
+                                    setTimeout(checkProgress, 1000);
+                                } else if (response.status === 'complete') {
+                                    $logContent.append('Geração concluída!\n');
+                                    $button.prop('disabled', false);
+                                    window.location.reload();
+                                }
+                            }
+                        });
+                    }
+                    
+                    // Iniciar a verificação de progresso
+                    checkProgress();
+                    
+                    // Enviar o formulário via AJAX
+                    $.post($button.closest('form').attr('action'), $button.closest('form').serialize())
+                        .fail(function() {
+                            $logContent.append('Erro ao iniciar a geração do sitemap\n');
+                            $button.prop('disabled', false);
+                        });
+                });
+            });
+            </script>
+        </div>
+        <?php
+    }
+
+    private function get_log_contents() {
+        if (!file_exists($this->log_file)) {
+            return 'Nenhum log disponível.';
+        }
+        
+        return file_get_contents($this->log_file);
     }
 
     public function clear_sitemap_cache() {
@@ -609,7 +670,7 @@ class Simple_News_Sitemap {
         return false;
     }
 
-    private function add_to_log($message) {
+    public function add_to_log($message) {
         // Manter apenas os últimos 50 logs
         $this->options['generation_log'][] = [
             'time' => current_time('mysql'),
@@ -625,7 +686,126 @@ class Simple_News_Sitemap {
         update_option('simple_news_sitemap_options', $this->options);
     }
 
-    private function clear_cloudflare_cache($sitemap_url) {
+    public function ajax_check_progress() {
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error('Acesso negado');
+        }
+
+        // Verificar se existe um processo de geração em andamento
+        $generation_status = get_transient('simple_news_sitemap_generating');
+        if (!$generation_status) {
+            wp_send_json(['status' => 'complete']);
+        }
+
+        // Ler as últimas linhas do log
+        $last_log = $this->get_last_log_line();
+        if ($last_log) {
+            wp_send_json(['status' => 'running', 'message' => $last_log]);
+        }
+
+        wp_send_json(['status' => 'running', 'message' => 'Processando...']);
+    }
+
+    private function get_last_log_line() {
+        if (!file_exists($this->log_file)) {
+            return false;
+        }
+
+        $lines = file($this->log_file);
+        if ($lines) {
+            return trim(end($lines));
+        }
+
+        return false;
+    }
+
+    public function handle_manual_generation() {
+        if (!current_user_can('manage_options')) {
+            wp_die('Acesso negado');
+        }
+
+        check_admin_referer('generate_sitemap_now');
+        
+        try {
+            // Definir flag de geração em andamento
+            set_transient('simple_news_sitemap_generating', true, 5 * MINUTE_IN_SECONDS);
+            
+            // Limpar cache antes de gerar
+            wp_cache_delete($this->cache_key, $this->cache_group);
+            
+            // Gerar sitemap
+            $xml = $this->generate_sitemap();
+            
+            if ($xml) {
+                // Limpar caches
+                $this->clear_sitemap_cache();
+                delete_transient('simple_news_sitemap_generating');
+                
+                wp_redirect(add_query_arg(
+                    ['page' => 'simple-news-sitemap', 'generated' => '1'],
+                    admin_url('options-general.php')
+                ));
+                exit;
+            } else {
+                throw new Exception('Erro ao gerar o XML do sitemap');
+            }
+        } catch (Exception $e) {
+            delete_transient('simple_news_sitemap_generating');
+            
+            $this->add_to_log([
+                'time' => current_time('mysql'),
+                'message' => 'Erro: ' . $e->getMessage(),
+                'count' => 0,
+                'execution_time' => 0
+            ]);
+            
+            wp_redirect(add_query_arg(
+                ['page' => 'simple-news-sitemap', 'error' => urlencode($e->getMessage())],
+                admin_url('options-general.php')
+            ));
+            exit;
+        }
+    }
+
+    private function generate_url_entry($post) {
+        $xml = '';
+        $xml .= "\t<url>\n";
+        $xml .= "\t\t<loc>" . esc_url(get_permalink($post->ID)) . "</loc>\n";
+        $xml .= "\t\t<news:news>\n";
+        $xml .= "\t\t\t<news:publication>\n";
+        $xml .= "\t\t\t\t<news:name>" . esc_xml(get_bloginfo('name')) . "</news:name>\n";
+        $xml .= "\t\t\t\t<news:language>pt-BR</news:language>\n";
+        $xml .= "\t\t\t</news:publication>\n";
+        $xml .= "\t\t\t<news:publication_date>" . mysql2date('c', $post->post_date_gmt) . "</news:publication_date>\n";
+        $xml .= "\t\t\t<news:title>" . esc_xml($post->post_title) . "</news:title>\n";
+        $xml .= "\t\t</news:news>\n";
+        $xml .= "\t</url>\n";
+        return $xml;
+    }
+
+    private function esc_xml($string) {
+        return htmlspecialchars(html_entity_decode($string, ENT_QUOTES, 'UTF-8'), ENT_QUOTES, 'UTF-8');
+    }
+
+    private function save_sitemap_file($xml) {
+        $temp_file = $this->sitemap_path . '.tmp';
+        
+        if (file_put_contents($temp_file, $xml) === false) {
+            $this->log_message("Erro ao escrever arquivo temporário do sitemap", 'error');
+            return false;
+        }
+        
+        if (!rename($temp_file, $this->sitemap_path)) {
+            unlink($temp_file);
+            $this->log_message("Erro ao renomear arquivo temporário do sitemap", 'error');
+            return false;
+        }
+        
+        $this->log_message("Arquivo do sitemap salvo com sucesso");
+        return true;
+    }
+
+    public function clear_cloudflare_cache($sitemap_url) {
         if (empty($this->options['cloudflare_email']) || 
             empty($this->options['cloudflare_api_key']) || 
             empty($this->options['cloudflare_zone_id'])) {
