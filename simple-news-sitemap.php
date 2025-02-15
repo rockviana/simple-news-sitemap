@@ -54,27 +54,27 @@ class Simple_News_Sitemap {
     }
 
     public function init() {
-        add_rewrite_rule(
-            'news-sitemap\.xml$',
-            'index.php?simple_news_sitemap=1',
-            'top'
-        );
-        add_filter('query_vars', function($vars) {
-            $vars[] = 'simple_news_sitemap';
-            return $vars;
-        });
         add_action('template_redirect', [$this, 'serve_sitemap']);
+        add_action('pre_get_posts', [$this, 'handle_sitemap_request']);
+    }
+
+    public function handle_sitemap_request($query) {
+        if (!$query->is_main_query()) {
+            return;
+        }
+
+        $current_url = $_SERVER['REQUEST_URI'];
+        if (strpos($current_url, 'news-sitemap.xml') !== false) {
+            $this->serve_sitemap();
+            exit;
+        }
     }
 
     public function serve_sitemap() {
-        if (get_query_var('simple_news_sitemap') == 1) {
+        $current_url = $_SERVER['REQUEST_URI'];
+        if (strpos($current_url, 'news-sitemap.xml') !== false) {
             header('Content-Type: application/xml; charset=UTF-8');
-            if (file_exists($this->sitemap_path)) {
-                readfile($this->sitemap_path);
-            } else {
-                $this->generate_sitemap();
-                readfile($this->sitemap_path);
-            }
+            echo $this->generate_sitemap();
             exit;
         }
     }
@@ -356,62 +356,81 @@ class Simple_News_Sitemap {
     }
 
     public function generate_sitemap() {
-        $posts = get_posts([
+        $xml = new DOMDocument('1.0', 'UTF-8');
+        $xml->formatOutput = true;
+
+        $urlset = $xml->createElementNS('http://www.sitemaps.org/schemas/sitemap/0.9', 'urlset');
+        $urlset->setAttributeNS('http://www.w3.org/2000/xmlns/', 'xmlns:news', 'http://www.google.com/schemas/sitemap-news/0.9');
+        $xml->appendChild($urlset);
+
+        // Buscar posts das últimas 48 horas
+        $args = [
             'post_type' => 'post',
             'post_status' => 'publish',
             'posts_per_page' => $this->options['max_news'],
-            'category__in' => $this->options['categories'],
+            'category__in' => isset($this->options['categories']) ? $this->options['categories'] : [],
             'date_query' => [
                 [
                     'after' => '48 hours ago',
                     'inclusive' => true,
                 ]
-            ]
-        ]);
+            ],
+            'orderby' => 'date',
+            'order' => 'DESC'
+        ];
 
-        $xml = new DOMDocument('1.0', 'UTF-8');
-        $xml->formatOutput = true;
+        $query = new WP_Query($args);
+        
+        if ($query->have_posts()) {
+            while ($query->have_posts()) {
+                $query->the_post();
+                
+                // Verificar se o post está excluído manualmente
+                if (get_post_meta(get_the_ID(), '_simple_news_sitemap_exclude', true)) {
+                    continue;
+                }
 
-        $urlset = $xml->createElement('urlset');
-        $urlset->setAttribute('xmlns', 'http://www.sitemaps.org/schemas/sitemap/0.9');
-        $urlset->setAttribute('xmlns:news', 'http://www.google.com/schemas/sitemap-news/0.9');
-        $xml->appendChild($urlset);
+                $url = $xml->createElement('url');
+                
+                // URL do post
+                $loc = $xml->createElement('loc');
+                $loc->appendChild($xml->createTextNode(get_permalink()));
+                $url->appendChild($loc);
 
-        foreach ($posts as $post) {
-            if (get_post_meta($post->ID, '_simple_news_sitemap_exclude', true)) {
-                continue;
+                // Informações de notícia
+                $news = $xml->createElement('news:news');
+                
+                // Publicação
+                $publication = $xml->createElement('news:publication');
+                
+                $name = $xml->createElement('news:name');
+                $name->appendChild($xml->createTextNode('Central da Toca'));
+                $publication->appendChild($name);
+                
+                $language = $xml->createElement('news:language');
+                $language->appendChild($xml->createTextNode('pt-BR'));
+                $publication->appendChild($language);
+                
+                $news->appendChild($publication);
+
+                // Data de publicação
+                $pub_date = $xml->createElement('news:publication_date');
+                $pub_date->appendChild($xml->createTextNode(get_the_date('c')));
+                $news->appendChild($pub_date);
+
+                // Título
+                $title = $xml->createElement('news:title');
+                $title->appendChild($xml->createTextNode(html_entity_decode(get_the_title(), ENT_QUOTES, 'UTF-8')));
+                $news->appendChild($title);
+
+                $url->appendChild($news);
+                $urlset->appendChild($url);
             }
-
-            $url = $xml->createElement('url');
-            
-            $loc = $xml->createElement('loc', get_permalink($post));
-            $url->appendChild($loc);
-
-            $news = $xml->createElement('news:news');
-            
-            $publication = $xml->createElement('news:publication');
-            
-            $name = $xml->createElement('news:name', 'Central da Toca');
-            $publication->appendChild($name);
-            
-            $language = $xml->createElement('news:language', 'pt-BR');
-            $publication->appendChild($language);
-            
-            $news->appendChild($publication);
-
-            $pub_date = $xml->createElement('news:publication_date', 
-                get_the_date('c', $post));
-            $news->appendChild($pub_date);
-
-            $title = $xml->createElement('news:title', 
-                html_entity_decode(get_the_title($post), ENT_QUOTES, 'UTF-8'));
-            $news->appendChild($title);
-
-            $url->appendChild($news);
-            $urlset->appendChild($url);
         }
+        
+        wp_reset_postdata();
 
-        $xml->save($this->sitemap_path);
+        return $xml->saveXML();
     }
 
     public function update_sitemap() {
