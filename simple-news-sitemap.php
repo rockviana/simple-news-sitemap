@@ -23,6 +23,9 @@ class Simple_News_Sitemap {
     private $options;
     private $sitemap_path;
     private $site_url;
+    private $cache_key = 'simple_news_sitemap_xml_cache';
+    private $cache_group = 'simple_news_sitemap';
+    private $cache_expiration = 300; // 5 minutos
 
     public static function get_instance() {
         if (null === self::$instance) {
@@ -46,14 +49,25 @@ class Simple_News_Sitemap {
             'generation_log' => []
         ]);
 
+        // Inicializar cache
+        wp_cache_add_non_persistent_groups($this->cache_group);
+
+        // Hooks principais
         add_action('init', [$this, 'init']);
         add_action('admin_menu', [$this, 'add_admin_menu']);
         add_action('admin_init', [$this, 'register_settings']);
-        add_action('save_post', [$this, 'handle_post_update']);
-        add_action('delete_post', [$this, 'handle_post_update']);
+        
+        // Otimizar hooks de atualização
+        add_action('transition_post_status', [$this, 'handle_post_status_transition'], 10, 3);
         add_action('add_meta_boxes', [$this, 'add_exclude_meta_box']);
         add_action('save_post', [$this, 'save_exclude_meta']);
         add_action('admin_post_generate_sitemap_now', [$this, 'handle_manual_generation']);
+
+        // Adicionar schedule para limpeza de logs antigos
+        if (!wp_next_scheduled('simple_news_sitemap_cleanup')) {
+            wp_schedule_event(time(), 'daily', 'simple_news_sitemap_cleanup');
+        }
+        add_action('simple_news_sitemap_cleanup', [$this, 'cleanup_old_logs']);
     }
 
     public function handle_manual_generation() {
@@ -93,7 +107,21 @@ class Simple_News_Sitemap {
         $current_url = $_SERVER['REQUEST_URI'];
         if (strpos($current_url, 'news-sitemap.xml') !== false) {
             header('Content-Type: application/xml; charset=UTF-8');
-            echo $this->generate_sitemap();
+            
+            // Tentar obter do cache
+            $cached_xml = wp_cache_get($this->cache_key, $this->cache_group);
+            if ($cached_xml !== false) {
+                echo $cached_xml;
+                exit;
+            }
+
+            // Gerar novo XML
+            $xml = $this->generate_sitemap();
+            
+            // Salvar no cache
+            wp_cache_set($this->cache_key, $xml, $this->cache_group, $this->cache_expiration);
+            
+            echo $xml;
             exit;
         }
     }
@@ -370,42 +398,193 @@ class Simple_News_Sitemap {
         return $input;
     }
 
-    public function handle_post_update($post_id) {
-        if (defined('DOING_AUTOSAVE') && DOING_AUTOSAVE) {
-            return;
-        }
-
-        if (wp_is_post_revision($post_id)) {
-            return;
-        }
-
-        $post = get_post($post_id);
+    public function handle_post_status_transition($new_status, $old_status, $post) {
+        // Só atualiza se for um post e se houver mudança relevante de status
         if ($post->post_type !== 'post') {
             return;
         }
 
+        $relevant_statuses = ['publish', 'trash', 'draft'];
+        if (!in_array($new_status, $relevant_statuses) && !in_array($old_status, $relevant_statuses)) {
+            return;
+        }
+
+        // Limpar cache do XML
+        wp_cache_delete($this->cache_key, $this->cache_group);
+        
+        // Gerar novo sitemap
         $this->generate_sitemap();
-        $this->clear_sitemap_cache();
     }
 
-    private function clear_sitemap_cache() {
-        $sitemap_url = home_url('/news-sitemap.xml');
+    public function cleanup_old_logs() {
+        // Manter apenas os últimos 7 dias de logs
+        if (!empty($this->options['generation_log'])) {
+            $cutoff_date = strtotime('-7 days');
+            $this->options['generation_log'] = array_filter(
+                $this->options['generation_log'],
+                function($log) use ($cutoff_date) {
+                    return strtotime($log['time']) > $cutoff_date;
+                }
+            );
+            update_option('simple_news_sitemap_options', $this->options);
+        }
+    }
 
-        if (isset($this->options['enable_siteground']) && $this->options['enable_siteground']) {
-            if (function_exists('do_action')) {
-                do_action('sg_cachepress_purge_url', $sitemap_url);
+    public function generate_sitemap() {
+        global $wpdb;
+        $start_time = microtime(true);
+        $posts_count = 0;
+
+        $xml = new DOMDocument('1.0', 'UTF-8');
+        $xml->formatOutput = true;
+
+        $urlset = $xml->createElementNS('http://www.sitemaps.org/schemas/sitemap/0.9', 'urlset');
+        $urlset->setAttributeNS('http://www.w3.org/2000/xmlns/', 'xmlns:news', 'http://www.google.com/schemas/sitemap-news/0.9');
+        $xml->appendChild($urlset);
+
+        // Query otimizada usando SQL direto
+        $categories = array_map('intval', $this->options['categories']);
+        $categories_in = empty($categories) ? '' : "AND tt.term_id IN (" . implode(',', $categories) . ")";
+        
+        $query = $wpdb->prepare(
+            "SELECT DISTINCT p.ID, p.post_title, p.post_date_gmt, p.guid 
+            FROM {$wpdb->posts} p
+            LEFT JOIN {$wpdb->term_relationships} tr ON (p.ID = tr.object_id)
+            LEFT JOIN {$wpdb->term_taxonomy} tt ON (tr.term_taxonomy_id = tt.term_taxonomy_id)
+            WHERE p.post_type = 'post' 
+            AND p.post_status = 'publish'
+            AND p.post_date_gmt > %s
+            {$categories_in}
+            ORDER BY p.post_date_gmt DESC
+            LIMIT %d",
+            gmdate('Y-m-d H:i:s', strtotime('-24 hours')),
+            intval($this->options['max_news'])
+        );
+
+        $posts = $wpdb->get_results($query);
+
+        if ($posts) {
+            // Pré-carregar meta dados em massa
+            $post_ids = wp_list_pluck($posts, 'ID');
+            update_meta_cache('post', $post_ids);
+
+            foreach ($posts as $post) {
+                if (get_post_meta($post->ID, '_simple_news_sitemap_exclude', true)) {
+                    continue;
+                }
+
+                $url = $xml->createElement('url');
+                
+                $loc = $xml->createElement('loc');
+                $loc->appendChild($xml->createTextNode(get_permalink($post->ID)));
+                $url->appendChild($loc);
+
+                $news = $xml->createElement('news:news');
+                
+                $publication = $xml->createElement('news:publication');
+                
+                $name = $xml->createElement('news:name');
+                $name->appendChild($xml->createTextNode('Central da Toca'));
+                $publication->appendChild($name);
+                
+                $language = $xml->createElement('news:language');
+                $language->appendChild($xml->createTextNode('pt-BR'));
+                $publication->appendChild($language);
+                
+                $news->appendChild($publication);
+
+                $pub_date = $xml->createElement('news:publication_date');
+                $pub_date->appendChild($xml->createTextNode(mysql2date('c', $post->post_date_gmt)));
+                $news->appendChild($pub_date);
+
+                $title = $xml->createElement('news:title');
+                $title->appendChild($xml->createTextNode(html_entity_decode($post->post_title, ENT_QUOTES, 'UTF-8')));
+                $news->appendChild($title);
+
+                $url->appendChild($news);
+                $urlset->appendChild($url);
+                $posts_count++;
             }
         }
 
+        $execution_time = round(microtime(true) - $start_time, 2);
+        
+        $log_message = sprintf(
+            'Sitemap gerado em %s segundos. %s',
+            $execution_time,
+            $posts_count > 0 ? '' : 'Nenhum post encontrado nas últimas 24 horas.'
+        );
+
+        $this->add_to_log([
+            'time' => current_time('mysql'),
+            'message' => $log_message,
+            'count' => $posts_count,
+            'execution_time' => $execution_time
+        ]);
+
+        $this->options['last_update'] = current_time('mysql');
+        update_option('simple_news_sitemap_options', $this->options);
+
+        return $xml->saveXML();
+    }
+
+    public function clear_sitemap_cache() {
+        $sitemap_url = home_url('/news-sitemap.xml');
+
+        // Limpar cache do SiteGround
+        if (isset($this->options['enable_siteground']) && $this->options['enable_siteground']) {
+            // Primeiro tenta via WP-CLI
+            if (!defined('WP_CLI') && function_exists('shell_exec') && $this->is_shell_exec_available()) {
+                $command = sprintf('wp sg purge %s 2>&1', escapeshellarg($sitemap_url));
+                $output = shell_exec($command);
+                
+                // Registrar no log
+                $log_message = $output ? "WP-CLI SG Cache: " . trim($output) : "WP-CLI SG Cache: Executado sem saída";
+                $this->add_to_log($log_message);
+            } 
+            // Fallback para o método padrão do SG
+            elseif (function_exists('do_action')) {
+                do_action('sg_cachepress_purge_url', $sitemap_url);
+                $this->add_to_log("Cache SG limpo via action sg_cachepress_purge_url");
+            }
+        }
+
+        // Limpar cache do Cloudflare
         if (isset($this->options['enable_cloudflare']) && $this->options['enable_cloudflare']) {
             $this->clear_cloudflare_cache($sitemap_url);
         }
+    }
+
+    private function is_shell_exec_available() {
+        if (function_exists('shell_exec') && !in_array('shell_exec', array_map('trim', explode(',', ini_get('disable_functions'))))) {
+            // Testar se podemos executar wp-cli
+            $test = shell_exec('wp --info 2>&1');
+            return $test !== null && !empty($test) && strpos($test, 'WP-CLI') !== false;
+        }
+        return false;
+    }
+
+    private function add_to_log($message) {
+        // Manter apenas os últimos 50 logs
+        $this->options['generation_log'][] = [
+            'time' => current_time('mysql'),
+            'message' => $message['message'],
+            'count' => $message['count'],
+            'execution_time' => $message['execution_time']
+        ];
+
+        if (count($this->options['generation_log']) > 50) {
+            $this->options['generation_log'] = array_slice($this->options['generation_log'], -50);
+        }
+
+        update_option('simple_news_sitemap_options', $this->options);
     }
 
     private function clear_cloudflare_cache($sitemap_url) {
         if (empty($this->options['cloudflare_email']) || 
             empty($this->options['cloudflare_api_key']) || 
             empty($this->options['cloudflare_zone_id'])) {
+            $this->add_to_log("Cloudflare: Configurações incompletas");
             return;
         }
 
@@ -424,119 +603,14 @@ class Simple_News_Sitemap {
         ]);
 
         if (is_wp_error($response)) {
-            error_log('Erro ao limpar cache do Cloudflare: ' . $response->get_error_message());
+            $this->add_to_log("Erro ao limpar cache do Cloudflare: " . $response->get_error_message());
+        } else {
+            $body = json_decode(wp_remote_retrieve_body($response), true);
+            $message = isset($body['success']) && $body['success'] 
+                      ? "Cache do Cloudflare limpo com sucesso" 
+                      : "Erro ao limpar cache do Cloudflare: " . json_encode($body['errors'] ?? []);
+            $this->add_to_log($message);
         }
-    }
-
-    public function generate_sitemap() {
-        $start_time = microtime(true);
-        $posts_count = 0;
-
-        $xml = new DOMDocument('1.0', 'UTF-8');
-        $xml->formatOutput = true;
-
-        $urlset = $xml->createElementNS('http://www.sitemaps.org/schemas/sitemap/0.9', 'urlset');
-        $urlset->setAttributeNS('http://www.w3.org/2000/xmlns/', 'xmlns:news', 'http://www.google.com/schemas/sitemap-news/0.9');
-        $xml->appendChild($urlset);
-
-        // Buscar posts das últimas 24 horas
-        $args = [
-            'post_type' => 'post',
-            'post_status' => 'publish',
-            'posts_per_page' => $this->options['max_news'],
-            'category__in' => isset($this->options['categories']) ? $this->options['categories'] : [],
-            'date_query' => [
-                [
-                    'after' => '24 hours ago',
-                    'inclusive' => true,
-                ]
-            ],
-            'orderby' => 'date',
-            'order' => 'DESC'
-        ];
-
-        $query = new WP_Query($args);
-        
-        if ($query->have_posts()) {
-            while ($query->have_posts()) {
-                $query->the_post();
-                
-                // Verificar se o post está excluído manualmente
-                if (get_post_meta(get_the_ID(), '_simple_news_sitemap_exclude', true)) {
-                    continue;
-                }
-
-                $url = $xml->createElement('url');
-                
-                // URL do post
-                $loc = $xml->createElement('loc');
-                $loc->appendChild($xml->createTextNode(get_permalink()));
-                $url->appendChild($loc);
-
-                // Informações de notícia
-                $news = $xml->createElement('news:news');
-                
-                // Publicação
-                $publication = $xml->createElement('news:publication');
-                
-                $name = $xml->createElement('news:name');
-                $name->appendChild($xml->createTextNode('Central da Toca'));
-                $publication->appendChild($name);
-                
-                $language = $xml->createElement('news:language');
-                $language->appendChild($xml->createTextNode('pt-BR'));
-                $publication->appendChild($language);
-                
-                $news->appendChild($publication);
-
-                // Data de publicação
-                $pub_date = $xml->createElement('news:publication_date');
-                $pub_date->appendChild($xml->createTextNode(get_the_date('c')));
-                $news->appendChild($pub_date);
-
-                // Título
-                $title = $xml->createElement('news:title');
-                $title->appendChild($xml->createTextNode(html_entity_decode(get_the_title(), ENT_QUOTES, 'UTF-8')));
-                $news->appendChild($title);
-
-                $url->appendChild($news);
-                $urlset->appendChild($url);
-                $posts_count++;
-            }
-        }
-        
-        wp_reset_postdata();
-
-        // Calcular tempo de execução
-        $execution_time = round(microtime(true) - $start_time, 2);
-
-        // Preparar mensagem de log
-        $log_message = sprintf(
-            'Sitemap gerado em %s segundos. %s',
-            $execution_time,
-            $posts_count > 0 ? '' : 'Nenhum post encontrado nas últimas 24 horas.'
-        );
-
-        // Manter apenas os últimos 50 logs
-        $this->options['generation_log'][] = [
-            'time' => current_time('mysql'),
-            'message' => $log_message,
-            'count' => $posts_count
-        ];
-
-        if (count($this->options['generation_log']) > 50) {
-            $this->options['generation_log'] = array_slice($this->options['generation_log'], -50);
-        }
-
-        // Atualizar a hora da última geração
-        $this->options['last_update'] = current_time('mysql');
-        update_option('simple_news_sitemap_options', $this->options);
-
-        return $xml->saveXML();
-    }
-
-    public function update_sitemap() {
-        $this->generate_sitemap();
     }
 }
 
