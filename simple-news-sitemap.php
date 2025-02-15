@@ -41,7 +41,8 @@ class Simple_News_Sitemap {
             'cloudflare_email' => '',
             'cloudflare_api_key' => '',
             'cloudflare_zone_id' => '',
-            'enable_siteground' => true
+            'enable_siteground' => true,
+            'last_update' => ''
         ]);
 
         add_action('init', [$this, 'init']);
@@ -232,6 +233,28 @@ class Simple_News_Sitemap {
         ?>
         <div class="wrap">
             <h1><?php echo esc_html(get_admin_page_title()); ?></h1>
+            
+            <?php
+            $sitemap_url = home_url('/news-sitemap.xml');
+            $last_update = !empty($this->options['last_update']) ? 
+                          wp_date('d/m/Y H:i:s', strtotime($this->options['last_update'])) : 
+                          'Ainda não gerado';
+            ?>
+            
+            <div class="notice notice-info">
+                <p>
+                    <strong>URL do Sitemap:</strong> 
+                    <a href="<?php echo esc_url($sitemap_url); ?>" target="_blank">
+                        <?php echo esc_html($sitemap_url); ?>
+                        <span class="dashicons dashicons-external" style="text-decoration: none;"></span>
+                    </a>
+                </p>
+                <p>
+                    <strong>Última Atualização:</strong> 
+                    <?php echo esc_html($last_update); ?>
+                </p>
+            </div>
+
             <form action="options.php" method="post">
                 <?php
                 settings_fields('simple_news_sitemap');
@@ -429,6 +452,10 @@ class Simple_News_Sitemap {
         }
         
         wp_reset_postdata();
+
+        // Atualizar a hora da última geração
+        $this->options['last_update'] = current_time('mysql');
+        update_option('simple_news_sitemap_options', $this->options);
 
         return $xml->saveXML();
     }
