@@ -36,14 +36,19 @@ class Simple_News_Sitemap {
         $this->sitemap_path = ABSPATH . 'news-sitemap.xml';
         $this->options = get_option('simple_news_sitemap_options', [
             'categories' => [],
-            'max_news' => 50
+            'max_news' => 50,
+            'enable_cloudflare' => false,
+            'cloudflare_email' => '',
+            'cloudflare_api_key' => '',
+            'cloudflare_zone_id' => '',
+            'enable_siteground' => true
         ]);
 
         add_action('init', [$this, 'init']);
         add_action('admin_menu', [$this, 'add_admin_menu']);
         add_action('admin_init', [$this, 'register_settings']);
-        add_action('save_post', [$this, 'update_sitemap']);
-        add_action('delete_post', [$this, 'update_sitemap']);
+        add_action('save_post', [$this, 'handle_post_update']);
+        add_action('delete_post', [$this, 'handle_post_update']);
         add_action('add_meta_boxes', [$this, 'add_exclude_meta_box']);
         add_action('save_post', [$this, 'save_exclude_meta']);
     }
@@ -115,13 +120,88 @@ class Simple_News_Sitemap {
             'simple-news-sitemap',
             'simple_news_sitemap_section'
         );
+
+        add_settings_section(
+            'cache_section',
+            'Configurações de Cache',
+            null,
+            'simple-news-sitemap'
+        );
+
+        add_settings_field(
+            'enable_siteground',
+            'Limpeza de Cache SiteGround',
+            [$this, 'enable_siteground_callback'],
+            'simple-news-sitemap',
+            'cache_section'
+        );
+
+        add_settings_field(
+            'enable_cloudflare',
+            'Limpeza de Cache Cloudflare',
+            [$this, 'enable_cloudflare_callback'],
+            'simple-news-sitemap',
+            'cache_section'
+        );
+
+        add_settings_field(
+            'cloudflare_email',
+            'E-mail do Cloudflare',
+            [$this, 'cloudflare_email_callback'],
+            'simple-news-sitemap',
+            'cache_section'
+        );
+
+        add_settings_field(
+            'cloudflare_api_key',
+            'API Key do Cloudflare',
+            [$this, 'cloudflare_api_key_callback'],
+            'simple-news-sitemap',
+            'cache_section'
+        );
+
+        add_settings_field(
+            'cloudflare_zone_id',
+            'Zone ID do Cloudflare',
+            [$this, 'cloudflare_zone_id_callback'],
+            'simple-news-sitemap',
+            'cache_section'
+        );
     }
 
-    public function sanitize_options($input) {
-        $input['categories'] = array_map('intval', $input['categories']);
-        $input['max_news'] = intval($input['max_news']);
-        $this->generate_sitemap();
-        return $input;
+    public function enable_siteground_callback() {
+        printf(
+            '<input type="checkbox" name="simple_news_sitemap_options[enable_siteground]" %s>',
+            isset($this->options['enable_siteground']) && $this->options['enable_siteground'] ? 'checked' : ''
+        );
+    }
+
+    public function enable_cloudflare_callback() {
+        printf(
+            '<input type="checkbox" name="simple_news_sitemap_options[enable_cloudflare]" %s>',
+            isset($this->options['enable_cloudflare']) && $this->options['enable_cloudflare'] ? 'checked' : ''
+        );
+    }
+
+    public function cloudflare_email_callback() {
+        printf(
+            '<input type="email" class="regular-text" name="simple_news_sitemap_options[cloudflare_email]" value="%s">',
+            isset($this->options['cloudflare_email']) ? esc_attr($this->options['cloudflare_email']) : ''
+        );
+    }
+
+    public function cloudflare_api_key_callback() {
+        printf(
+            '<input type="password" class="regular-text" name="simple_news_sitemap_options[cloudflare_api_key]" value="%s">',
+            isset($this->options['cloudflare_api_key']) ? esc_attr($this->options['cloudflare_api_key']) : ''
+        );
+    }
+
+    public function cloudflare_zone_id_callback() {
+        printf(
+            '<input type="text" class="regular-text" name="simple_news_sitemap_options[cloudflare_zone_id]" value="%s">',
+            isset($this->options['cloudflare_zone_id']) ? esc_attr($this->options['cloudflare_zone_id']) : ''
+        );
     }
 
     public function categories_callback() {
@@ -200,6 +280,79 @@ class Simple_News_Sitemap {
 
         $excluded = isset($_POST['simple_news_sitemap_exclude']) ? '1' : '0';
         update_post_meta($post_id, '_simple_news_sitemap_exclude', $excluded);
+    }
+
+    public function sanitize_options($input) {
+        $input['categories'] = isset($input['categories']) ? array_map('intval', $input['categories']) : [];
+        $input['max_news'] = isset($input['max_news']) ? intval($input['max_news']) : 50;
+        $input['enable_siteground'] = isset($input['enable_siteground']);
+        $input['enable_cloudflare'] = isset($input['enable_cloudflare']);
+        $input['cloudflare_email'] = sanitize_email($input['cloudflare_email']);
+        $input['cloudflare_api_key'] = sanitize_text_field($input['cloudflare_api_key']);
+        $input['cloudflare_zone_id'] = sanitize_text_field($input['cloudflare_zone_id']);
+        
+        $this->generate_sitemap();
+        $this->clear_sitemap_cache();
+        
+        return $input;
+    }
+
+    public function handle_post_update($post_id) {
+        if (defined('DOING_AUTOSAVE') && DOING_AUTOSAVE) {
+            return;
+        }
+
+        if (wp_is_post_revision($post_id)) {
+            return;
+        }
+
+        $post = get_post($post_id);
+        if ($post->post_type !== 'post') {
+            return;
+        }
+
+        $this->generate_sitemap();
+        $this->clear_sitemap_cache();
+    }
+
+    private function clear_sitemap_cache() {
+        $sitemap_url = home_url('/news-sitemap.xml');
+
+        if (isset($this->options['enable_siteground']) && $this->options['enable_siteground']) {
+            if (function_exists('do_action')) {
+                do_action('sg_cachepress_purge_url', $sitemap_url);
+            }
+        }
+
+        if (isset($this->options['enable_cloudflare']) && $this->options['enable_cloudflare']) {
+            $this->clear_cloudflare_cache($sitemap_url);
+        }
+    }
+
+    private function clear_cloudflare_cache($sitemap_url) {
+        if (empty($this->options['cloudflare_email']) || 
+            empty($this->options['cloudflare_api_key']) || 
+            empty($this->options['cloudflare_zone_id'])) {
+            return;
+        }
+
+        $url = "https://api.cloudflare.com/client/v4/zones/" . 
+               $this->options['cloudflare_zone_id'] . "/purge_cache";
+
+        $response = wp_remote_post($url, [
+            'headers' => [
+                'X-Auth-Email' => $this->options['cloudflare_email'],
+                'X-Auth-Key' => $this->options['cloudflare_api_key'],
+                'Content-Type' => 'application/json',
+            ],
+            'body' => json_encode([
+                'files' => [$sitemap_url]
+            ]),
+        ]);
+
+        if (is_wp_error($response)) {
+            error_log('Erro ao limpar cache do Cloudflare: ' . $response->get_error_message());
+        }
     }
 
     public function generate_sitemap() {
