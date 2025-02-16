@@ -1,0 +1,155 @@
+.wrap {
+    max-width: 1200px;
+    margin: 20px auto;
+}
+
+.nav-tab-wrapper {
+    margin-bottom: 20px;
+}
+
+.tab-panel {
+    display: none;
+    background: #fff;
+    padding: 20px;
+    border: 1px solid #ccd0d4;
+    box-shadow: 0 1px 1px rgba(0,0,0,.04);
+}
+
+.tab-panel.active {
+    display: block;
+}
+
+.form-table th {
+    width: 200px;
+}
+
+.form-table td {
+    padding: 15px 10px;
+}
+
+.form-table input[type="text"],
+.form-table input[type="email"],
+.form-table input[type="password"],
+.form-table input[type="number"],
+.form-table select {
+    min-width: 300px;
+}
+
+.form-table select[multiple] {
+    min-height: 150px;
+}
+
+.description {
+    color: #666;
+    font-style: italic;
+    margin-top: 5px;
+}
+
+#generation-progress {
+    margin: 20px 0;
+    padding: 15px;
+    background: #f8f9fa;
+    border-left: 4px solid #007cba;
+}
+
+#generation-progress p {
+    margin: 0;
+}
+
+#generation-progress .success {
+    color: #46b450;
+}
+
+#generation-progress .error {
+    color: #dc3232;
+}
+
+.log-viewer {
+    background: #f8f9fa;
+    padding: 15px;
+    max-height: 400px;
+    overflow-y: auto;
+    font-family: monospace;
+    font-size: 12px;
+    line-height: 1.5;
+    margin: 20px 0;
+}
+
+.log-viewer .log-entry {
+    margin-bottom: 5px;
+    padding-bottom: 5px;
+    border-bottom: 1px solid #eee;
+}
+
+.log-viewer .log-entry:last-child {
+    border-bottom: none;
+}
+
+.log-viewer .timestamp {
+    color: #666;
+}
+
+.log-viewer .level-error {
+    color: #dc3232;
+}
+
+.log-viewer .level-info {
+    color: #007cba;
+}
+
+#cloudflare_settings {
+    display: none;
+    padding: 15px;
+    background: #f8f9fa;
+    border: 1px solid #ccd0d4;
+    margin-top: 10px;
+}
+
+.button-primary {
+    margin-top: 20px !important;
+}
+
+.status-info {
+    margin: 20px 0;
+    padding: 15px;
+    background: #fff;
+    border: 1px solid #ccd0d4;
+    box-shadow: 0 1px 1px rgba(0,0,0,.04);
+}
+
+.status-info p {
+    margin: 0 0 10px 0;
+}
+
+.status-info p:last-child {
+    margin-bottom: 0;
+}
+
+.status-info .label {
+    font-weight: bold;
+    min-width: 150px;
+    display: inline-block;
+}
+
+.status-badge {
+    display: inline-block;
+    padding: 3px 8px;
+    border-radius: 3px;
+    font-size: 12px;
+    font-weight: bold;
+}
+
+.status-badge.success {
+    background: #46b450;
+    color: #fff;
+}
+
+.status-badge.warning {
+    background: #ffb900;
+    color: #fff;
+}
+
+.status-badge.error {
+    background: #dc3232;
+    color: #fff;
+}
