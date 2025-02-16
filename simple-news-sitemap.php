@@ -14,113 +14,143 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-// Constantes
-define('SIMPLE_NEWS_SITEMAP_VERSION', '1.0.0');
-define('SIMPLE_NEWS_SITEMAP_FILE', __FILE__);
-define('SIMPLE_NEWS_SITEMAP_PATH', dirname(SIMPLE_NEWS_SITEMAP_FILE));
+class GoogleNewsSitemapGenerator {
+    private static $instance = null;
 
-// Hooks principais
-add_action('init', 'simple_news_sitemap_init');
-add_action('do_feed_sitemap-news', 'simple_news_sitemap_do_feed');
-add_filter('generate_rewrite_rules', 'simple_news_sitemap_rewrite_rules');
+    public static function getInstance() {
+        if (self::$instance == null) {
+            self::$instance = new GoogleNewsSitemapGenerator();
+        }
+        return self::$instance;
+    }
 
-// Hooks de ativação/desativação
-register_activation_hook(SIMPLE_NEWS_SITEMAP_FILE, 'simple_news_sitemap_activate');
-register_deactivation_hook(SIMPLE_NEWS_SITEMAP_FILE, 'simple_news_sitemap_deactivate');
+    private function __construct() {
+        add_action('init', array($this, 'init'));
+        add_action('admin_menu', array($this, 'admin_menu'));
+        add_action('admin_init', array($this, 'admin_init'));
+        register_activation_hook(__FILE__, array($this, 'activate'));
+        register_deactivation_hook(__FILE__, array($this, 'deactivate'));
+    }
 
-/**
- * Inicialização
- */
-function simple_news_sitemap_init() {
-    // Registrar feed
-    add_feed('sitemap-news', 'simple_news_sitemap_do_feed');
-}
+    public function init() {
+        if (!get_option('simple_news_sitemap_activated')) {
+            $this->activate();
+        }
+        add_action('do_robots', array($this, 'do_robots'));
+        add_action('template_redirect', array($this, 'template_redirect'));
+    }
 
-/**
- * Regras de rewrite
- */
-function simple_news_sitemap_rewrite_rules($wp_rewrite) {
-    $new_rules = array(
-        'sitemap-news\.xml$' => $wp_rewrite->index . '?feed=sitemap-news',
-    );
-    $wp_rewrite->rules = $new_rules + $wp_rewrite->rules;
-    return $wp_rewrite;
-}
+    public function admin_init() {
+        register_setting('simple-news-sitemap', 'simple_news_sitemap_options');
+    }
 
-/**
- * Gerar feed do sitemap
- */
-function simple_news_sitemap_do_feed() {
-    // Headers
-    header('Content-Type: application/xml; charset=' . get_bloginfo('charset'));
-    header('X-Robots-Tag: noindex, follow');
+    public function admin_menu() {
+        add_options_page(
+            'News Sitemap',
+            'News Sitemap',
+            'manage_options',
+            'simple-news-sitemap',
+            array($this, 'options_page')
+        );
+    }
 
-    // Cache
-    $now = time();
-    header('Cache-Control: maxage=300');
-    header('Last-Modified: ' . gmdate('D, d M Y H:i:s', $now) . ' GMT');
-    header('Expires: ' . gmdate('D, d M Y H:i:s', $now + 300) . ' GMT');
+    public function options_page() {
+        ?>
+        <div class="wrap">
+            <h2>News Sitemap</h2>
+            <p>Seu sitemap de notícias está disponível em: <a href="<?php echo $this->get_sitemap_url(); ?>" target="_blank"><?php echo esc_html($this->get_sitemap_url()); ?></a></p>
+        </div>
+        <?php
+    }
 
-    // Query posts
-    $posts = get_posts(array(
-        'post_type' => 'post',
-        'post_status' => 'publish',
-        'posts_per_page' => 1000,
-        'orderby' => 'modified',
-        'order' => 'DESC',
-        'date_query' => array(
-            array(
-                'after' => '48 hours ago',
-                'inclusive' => true,
+    public function activate() {
+        add_option('simple_news_sitemap_activated', true);
+        add_option('simple_news_sitemap_options', array());
+        $this->add_rewrite_rules();
+        flush_rewrite_rules();
+    }
+
+    public function deactivate() {
+        delete_option('simple_news_sitemap_activated');
+        delete_option('simple_news_sitemap_options');
+        remove_action('do_robots', array($this, 'do_robots'));
+        flush_rewrite_rules();
+    }
+
+    private function add_rewrite_rules() {
+        add_rewrite_rule(
+            'sitemap-news\.xml$',
+            'index.php?simple-news-sitemap=true',
+            'top'
+        );
+        add_filter('query_vars', array($this, 'add_query_vars'));
+    }
+
+    public function add_query_vars($vars) {
+        $vars[] = 'simple-news-sitemap';
+        return $vars;
+    }
+
+    public function template_redirect() {
+        global $wp_query;
+        if (isset($wp_query->query_vars['simple-news-sitemap'])) {
+            $this->generate_sitemap();
+            exit;
+        }
+    }
+
+    public function do_robots() {
+        echo 'Sitemap: ' . $this->get_sitemap_url() . "\n";
+    }
+
+    private function get_sitemap_url() {
+        return home_url('/sitemap-news.xml');
+    }
+
+    private function generate_sitemap() {
+        global $wpdb;
+
+        // Headers
+        header('Content-Type: application/xml; charset=' . get_bloginfo('charset'));
+        header('X-Robots-Tag: noindex, follow');
+
+        // Cache
+        $now = time();
+        header('Cache-Control: maxage=300');
+        header('Last-Modified: ' . gmdate('D, d M Y H:i:s', $now) . ' GMT');
+        header('Expires: ' . gmdate('D, d M Y H:i:s', $now + 300) . ' GMT');
+
+        // Query posts
+        $posts = get_posts(array(
+            'post_type' => 'post',
+            'post_status' => 'publish',
+            'posts_per_page' => 1000,
+            'orderby' => 'modified',
+            'order' => 'DESC',
+            'date_query' => array(
+                array(
+                    'after' => '48 hours ago',
+                    'inclusive' => true,
+                ),
             ),
-        ),
-        'no_found_rows' => true,
-        'update_post_term_cache' => false,
-        'update_post_meta_cache' => false,
-    ));
+            'no_found_rows' => true,
+            'update_post_term_cache' => false,
+            'update_post_meta_cache' => false,
+        ));
 
-    // Carregar template
-    require_once SIMPLE_NEWS_SITEMAP_PATH . '/templates/sitemap-news.php';
-    exit;
+        // Load template
+        require_once dirname(__FILE__) . '/templates/sitemap-news.php';
+    }
+
+    public function is_post_excluded($post) {
+        if (!$post) return true;
+
+        $excluded_types = array('nav_menu_item', 'revision', 'attachment');
+        if (in_array($post->post_type, $excluded_types)) return true;
+
+        return apply_filters('simple_news_sitemap_exclude_post', false, $post);
+    }
 }
 
-/**
- * Ativação
- */
-function simple_news_sitemap_activate() {
-    // Registrar feed
-    simple_news_sitemap_init();
-    
-    // Atualizar regras
-    global $wp_rewrite;
-    $wp_rewrite->flush_rules();
-    
-    // Salvar versão
-    update_option('simple_news_sitemap_version', SIMPLE_NEWS_SITEMAP_VERSION);
-}
-
-/**
- * Desativação
- */
-function simple_news_sitemap_deactivate() {
-    // Limpar regras
-    global $wp_rewrite;
-    $wp_rewrite->flush_rules();
-    
-    // Remover opções
-    delete_option('simple_news_sitemap_version');
-}
-
-/**
- * Verificar exclusão de posts
- */
-function simple_news_sitemap_is_post_excluded($post) {
-    if (!$post) return true;
-
-    // Posts excluídos por padrão
-    $excluded_types = array('nav_menu_item', 'revision', 'attachment');
-    if (in_array($post->post_type, $excluded_types)) return true;
-
-    // Permitir filtro de exclusão
-    return apply_filters('simple_news_sitemap_exclude_post', false, $post);
-}
+// Initialize
+GoogleNewsSitemapGenerator::getInstance();

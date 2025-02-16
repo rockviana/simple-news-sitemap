@@ -15,7 +15,7 @@ if ($posts && count($posts) > 0) :
         setup_postdata($post);
         
         // Pular posts excluídos
-        if (simple_news_sitemap_is_post_excluded($post)) continue;
+        if (GoogleNewsSitemapGenerator::getInstance()->is_post_excluded($post)) continue;
 ?>
 <url>
     <loc><?php echo esc_url(get_permalink()); ?></loc>
