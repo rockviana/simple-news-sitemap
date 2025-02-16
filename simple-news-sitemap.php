@@ -165,10 +165,6 @@ class Simple_News_Sitemap {
         
         // Limpar cache
         wp_cache_delete('news_posts', $this->cache_group);
-        
-        // Ping Google News
-        $ping_url = 'https://www.google.com/ping?sitemap=' . urlencode($this->site_url . '/news-sitemap.xml');
-        wp_remote_get($ping_url, ['blocking' => false]);
     }
 }
 

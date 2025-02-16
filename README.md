@@ -7,7 +7,6 @@ Plugin WordPress otimizado para geração de sitemap para Google News.
 - Geração atômica do sitemap
 - Cache em dois níveis (objeto e transient)
 - Atualização automática ao publicar/editar posts
-- Ping automático para Google News
 - Máximo de 1000 notícias mais recentes
 - Zero configuração necessária
 
