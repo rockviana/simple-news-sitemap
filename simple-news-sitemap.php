@@ -14,28 +14,39 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
+// Constantes
 define('SIMPLE_NEWS_SITEMAP_VERSION', '1.0.0');
 define('SIMPLE_NEWS_SITEMAP_PATH', plugin_dir_path(__FILE__));
 
-function simple_news_sitemap_init() {
-    // Registrar regras de rewrite
-    global $wp_rewrite;
-    add_rewrite_rule('news-sitemap\.xml$', 'index.php?simple_news_sitemap=1', 'top');
-    
-    // Registrar variável de query
-    add_filter('query_vars', function($vars) {
-        $vars[] = 'simple_news_sitemap';
-        return $vars;
-    });
-    
-    // Handler do sitemap
-    add_action('template_redirect', 'simple_news_sitemap_template');
+// Adicionar regras de rewrite
+add_action('init', 'simple_news_sitemap_add_rewrite_rules');
+function simple_news_sitemap_add_rewrite_rules() {
+    add_rewrite_rule(
+        '^news-sitemap\.xml$',
+        'index.php?simple_news_sitemap=1',
+        'top'
+    );
 }
-add_action('init', 'simple_news_sitemap_init');
 
-function simple_news_sitemap_template() {
-    $is_sitemap = intval(get_query_var('simple_news_sitemap'));
-    if ($is_sitemap !== 1) return;
+// Registrar query var
+add_filter('query_vars', 'simple_news_sitemap_add_query_vars');
+function simple_news_sitemap_add_query_vars($vars) {
+    $vars[] = 'simple_news_sitemap';
+    return $vars;
+}
+
+// Handler do template
+add_action('parse_request', 'simple_news_sitemap_parse_request');
+function simple_news_sitemap_parse_request($wp) {
+    if (isset($wp->query_vars['simple_news_sitemap']) && $wp->query_vars['simple_news_sitemap'] === '1') {
+        simple_news_sitemap_generate();
+        exit;
+    }
+}
+
+// Gerar sitemap
+function simple_news_sitemap_generate() {
+    global $post;
 
     // Headers
     header('Content-Type: application/xml; charset=' . get_bloginfo('charset'));
@@ -49,7 +60,7 @@ function simple_news_sitemap_template() {
     header('Last-Modified: ' . gmdate('D, d M Y H:i:s', $now) . ' GMT');
 
     // Query posts
-    $posts = get_posts(array(
+    $args = array(
         'post_type' => 'post',
         'post_status' => 'publish',
         'posts_per_page' => 1000,
@@ -64,39 +75,61 @@ function simple_news_sitemap_template() {
         'no_found_rows' => true,
         'update_post_term_cache' => false,
         'update_post_meta_cache' => false,
-    ));
+    );
 
-    // Load template
+    $posts = get_posts($args);
+
+    // Carregar template
     require_once SIMPLE_NEWS_SITEMAP_PATH . 'templates/sitemap-news.php';
     exit;
 }
 
+// Ativação
+register_activation_hook(__FILE__, 'simple_news_sitemap_activate');
 function simple_news_sitemap_activate() {
-    // Adicionar regras
-    simple_news_sitemap_init();
-    
-    // Atualizar regras
+    simple_news_sitemap_add_rewrite_rules();
     flush_rewrite_rules();
-    
-    // Salvar versão
     update_option('simple_news_sitemap_version', SIMPLE_NEWS_SITEMAP_VERSION);
 }
-register_activation_hook(__FILE__, 'simple_news_sitemap_activate');
 
+// Desativação
+register_deactivation_hook(__FILE__, 'simple_news_sitemap_deactivate');
 function simple_news_sitemap_deactivate() {
-    // Limpar regras
     flush_rewrite_rules();
-    
-    // Remover opções
     delete_option('simple_news_sitemap_version');
 }
-register_deactivation_hook(__FILE__, 'simple_news_sitemap_deactivate');
 
+// Verificar exclusão de posts
 function simple_news_sitemap_is_post_excluded($post) {
+    if (!$post) return true;
+
     // Posts excluídos por padrão
     $excluded_types = array('nav_menu_item', 'revision', 'attachment');
     if (in_array($post->post_type, $excluded_types)) return true;
 
     // Permitir filtro de exclusão
     return apply_filters('simple_news_sitemap_exclude_post', false, $post);
+}
+
+// Adicionar link nas ferramentas do admin
+add_action('admin_menu', 'simple_news_sitemap_add_menu');
+function simple_news_sitemap_add_menu() {
+    add_management_page(
+        'News Sitemap',
+        'News Sitemap',
+        'manage_options',
+        'simple-news-sitemap',
+        'simple_news_sitemap_admin_page'
+    );
+}
+
+// Página de admin
+function simple_news_sitemap_admin_page() {
+    $sitemap_url = home_url('/news-sitemap.xml');
+    ?>
+    <div class="wrap">
+        <h1>News Sitemap</h1>
+        <p>Seu sitemap está disponível em: <a href="<?php echo esc_url($sitemap_url); ?>" target="_blank"><?php echo esc_html($sitemap_url); ?></a></p>
+    </div>
+    <?php
 }
