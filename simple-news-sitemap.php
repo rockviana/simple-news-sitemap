@@ -18,7 +18,7 @@ class GoogleNewsSitemapGenerator {
     private static $instance = null;
     private $lastPostModified = 0;
 
-    const SITEMAP_SCOPE = 'news-sitemap';
+    const FEED_SLUG = 'news-sitemap';
 
     public static function get_instance() {
         if (null === self::$instance) {
@@ -29,7 +29,7 @@ class GoogleNewsSitemapGenerator {
 
     private function __construct() {
         // Hooks principais
-        add_action('init', array($this, 'init'), 0);
+        add_action('init', array($this, 'init'));
         add_action('pre_get_posts', array($this, 'filter_news_posts'));
         add_action('publish_post', array($this, 'track_modified_posts'));
         add_action('transition_post_status', array($this, 'track_post_status'), 10, 3);
@@ -37,34 +37,55 @@ class GoogleNewsSitemapGenerator {
         // Hooks de ativação/desativação
         register_activation_hook(__FILE__, array($this, 'activate'));
         register_deactivation_hook(__FILE__, array($this, 'deactivate'));
+
+        // Adicionar feed
+        add_action('generate_rewrite_rules', array($this, 'add_feed_rewrite_rules'));
+        add_filter('query_vars', array($this, 'add_feed_query_var'));
+        add_action('template_redirect', array($this, 'handle_feed_template'));
     }
 
     public function init() {
-        // Registrar feed personalizado para o sitemap de notícias
-        add_feed(self::SITEMAP_SCOPE, array($this, 'render_sitemap'));
-        $this->add_rewrite_rules();
+        add_feed(self::FEED_SLUG, array($this, 'render_sitemap'));
     }
 
     public function activate() {
-        $this->add_rewrite_rules();
+        // Registrar feed
+        $this->init();
+        
+        // Atualizar regras
         flush_rewrite_rules();
+        
+        // Salvar versão
         update_option('simple_news_sitemap_version', '1.0.0');
     }
 
     public function deactivate() {
+        // Limpar regras
         flush_rewrite_rules();
+        
+        // Remover opções
         delete_option('simple_news_sitemap_version');
     }
 
-    private function add_rewrite_rules() {
-        global $wp_rewrite;
-        
-        // Usar um endpoint diferente para evitar conflitos
-        add_rewrite_rule(
-            'news-sitemap\.xml$',
-            'index.php?feed=' . self::SITEMAP_SCOPE,
-            'top'
+    public function add_feed_rewrite_rules($wp_rewrite) {
+        $feed_rules = array(
+            'news-sitemap\.xml$' => 'index.php?feed=' . self::FEED_SLUG
         );
+        $wp_rewrite->rules = $feed_rules + $wp_rewrite->rules;
+        return $wp_rewrite->rules;
+    }
+
+    public function add_feed_query_var($query_vars) {
+        $query_vars[] = 'feed';
+        return $query_vars;
+    }
+
+    public function handle_feed_template() {
+        $feed = get_query_var('feed');
+        if ($feed === self::FEED_SLUG) {
+            $this->render_sitemap();
+            exit;
+        }
     }
 
     public function track_modified_posts($post_id) {
@@ -82,7 +103,7 @@ class GoogleNewsSitemapGenerator {
     }
 
     public function filter_news_posts($query) {
-        if ($query->is_feed(self::SITEMAP_SCOPE)) {
+        if ($query->is_feed(self::FEED_SLUG)) {
             // Filtrar apenas posts das últimas 48 horas
             $query->set('post_type', 'post');
             $query->set('posts_per_page', 1000);
@@ -103,8 +124,6 @@ class GoogleNewsSitemapGenerator {
     }
 
     public function render_sitemap() {
-        global $wp_query;
-
         // Headers
         header('Content-Type: application/xml; charset=' . get_bloginfo('charset'));
         header('X-Robots-Tag: noindex, follow');
