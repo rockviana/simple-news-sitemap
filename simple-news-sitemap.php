@@ -60,6 +60,7 @@ class Simple_News_Sitemap {
         add_action('init', [$this, 'init']);
         add_action('admin_menu', [$this, 'add_admin_menu']);
         add_action('admin_init', [$this, 'register_settings']);
+        add_action('admin_enqueue_scripts', [$this, 'enqueue_admin_scripts']);
         
         // Otimizar hooks de atualização
         add_action('transition_post_status', [$this, 'handle_post_status_transition'], 10, 3);
@@ -263,95 +264,12 @@ class Simple_News_Sitemap {
         );
     }
 
-    public function admin_page() {
-        if (!current_user_can('manage_options')) {
+    public function enqueue_admin_scripts($hook) {
+        if ('settings_page_simple-news-sitemap' !== $hook) {
             return;
         }
-        ?>
-        <div class="wrap">
-            <h1><?php echo esc_html(get_admin_page_title()); ?></h1>
-            
-            <?php
-            if (isset($_GET['generated'])) {
-                echo '<div class="notice notice-success is-dismissible"><p>Sitemap gerado com sucesso!</p></div>';
-            }
-            
-            if (isset($_GET['error'])) {
-                $error = sanitize_text_field(urldecode($_GET['error']));
-                echo '<div class="notice notice-error is-dismissible"><p>Erro ao gerar sitemap: ' . esc_html($error) . '</p></div>';
-            }
 
-            $sitemap_url = home_url('/news-sitemap.xml');
-            $last_update = !empty($this->options['last_update']) ? 
-                          wp_date('d/m/Y H:i:s', strtotime($this->options['last_update'])) : 
-                          'Ainda não gerado';
-            ?>
-            
-            <div class="notice notice-info">
-                <p>
-                    <strong>URL do Sitemap:</strong> 
-                    <a href="<?php echo esc_url($sitemap_url); ?>" target="_blank">
-                        <?php echo esc_html($sitemap_url); ?>
-                        <span class="dashicons dashicons-external" style="text-decoration: none;"></span>
-                    </a>
-                </p>
-                <p>
-                    <strong>Última Atualização:</strong> 
-                    <?php echo esc_html($last_update); ?>
-                </p>
-                <p>
-                    <form action="<?php echo esc_url(admin_url('admin-post.php')); ?>" method="post" style="display: inline;">
-                        <?php wp_nonce_field('generate_sitemap_now'); ?>
-                        <input type="hidden" name="action" value="generate_sitemap_now">
-                        <button type="submit" class="button button-secondary" id="generate-sitemap-btn">
-                            <span class="dashicons dashicons-update" style="vertical-align: middle;"></span>
-                            Gerar Sitemap Agora
-                        </button>
-                    </form>
-                </p>
-            </div>
-
-            <?php if (!empty($this->options['generation_log'])): ?>
-                <div class="card" style="max-width: 100%;">
-                    <h2>Log de Geração do Sitemap</h2>
-                    <div style="max-height: 300px; overflow-y: auto; padding: 10px; background: #f8f9fa; border: 1px solid #ddd;">
-                        <?php 
-                        $logs = array_reverse($this->options['generation_log']);
-                        foreach ($logs as $log): 
-                            $message = is_array($log) ? $log['message'] : $log;
-                            $time = is_array($log) ? $log['time'] : current_time('mysql');
-                            $count = isset($log['count']) ? $log['count'] : null;
-                            $execution_time = isset($log['execution_time']) ? $log['execution_time'] : null;
-                        ?>
-                            <p style="margin: 5px 0; padding: 5px; border-bottom: 1px solid #eee;">
-                                <strong>[<?php echo esc_html(wp_date('d/m/Y H:i:s', strtotime($time))); ?>]</strong>
-                                <?php echo esc_html($message); ?>
-                                <?php if ($count !== null): ?>
-                                    <br>
-                                    <small>
-                                        Posts incluídos: <?php echo intval($count); ?>
-                                        <?php if ($execution_time !== null): ?>
-                                            | Tempo de execução: <?php echo number_format($execution_time, 2); ?>s
-                                        <?php endif; ?>
-                                    </small>
-                                <?php endif; ?>
-                            </p>
-                        <?php endforeach; ?>
-                    </div>
-                </div>
-            <?php endif; ?>
-
-            <script>
-            jQuery(document).ready(function($) {
-                $('#generate-sitemap-btn').click(function() {
-                    $(this).prop('disabled', true)
-                           .find('.dashicons')
-                           .addClass('dashicons-update-spin');
-                });
-            });
-            </script>
-        </div>
-        <?php
+        wp_enqueue_script('jquery');
     }
 
     public function add_exclude_meta_box() {
@@ -427,15 +345,18 @@ class Simple_News_Sitemap {
     }
 
     public function cleanup_old_logs() {
-        // Manter apenas os últimos 7 dias de logs
-        if (!empty($this->options['generation_log'])) {
-            $cutoff_date = strtotime('-7 days');
-            $this->options['generation_log'] = array_filter(
-                $this->options['generation_log'],
-                function($log) use ($cutoff_date) {
-                    return strtotime($log['time']) > $cutoff_date;
-                }
-            );
+        if (file_exists($this->log_file)) {
+            $logs = file($this->log_file, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+            if (count($logs) > 1000) { // Manter apenas as últimas 1000 linhas
+                $logs = array_slice($logs, -1000);
+                file_put_contents($this->log_file, implode(PHP_EOL, $logs));
+            }
+        }
+
+        // Limpar logs antigos do options
+        $logs = $this->options['generation_log'];
+        if (count($logs) > 50) {
+            $this->options['generation_log'] = array_slice($logs, -50);
             update_option('simple_news_sitemap_options', $this->options);
         }
     }
@@ -544,25 +465,57 @@ class Simple_News_Sitemap {
             return;
         }
         
-        $logs = $this->get_recent_logs();
         ?>
         <div class="wrap">
             <h1>Simple News Sitemap</h1>
             
+            <?php
+            if (isset($_GET['generated'])) {
+                echo '<div class="notice notice-success is-dismissible"><p>Sitemap gerado com sucesso!</p></div>';
+            }
+            
+            if (isset($_GET['error'])) {
+                $error = sanitize_text_field(urldecode($_GET['error']));
+                echo '<div class="notice notice-error is-dismissible"><p>Erro ao gerar sitemap: ' . esc_html($error) . '</p></div>';
+            }
+            ?>
+
             <form method="post" action="options.php">
                 <?php
                 settings_fields('simple_news_sitemap');
-                do_settings_sections('simple_news_sitemap');
-                submit_button();
+                do_settings_sections('simple-news-sitemap');
+                submit_button('Salvar Configurações');
                 ?>
             </form>
             
+            <?php
+            $sitemap_url = home_url('/news-sitemap.xml');
+            $last_update = !empty($this->options['last_update']) ? 
+                          wp_date('d/m/Y H:i:s', strtotime($this->options['last_update'])) : 
+                          'Ainda não gerado';
+            ?>
+            
+            <div class="notice notice-info">
+                <p>
+                    <strong>URL do Sitemap:</strong> 
+                    <a href="<?php echo esc_url($sitemap_url); ?>" target="_blank">
+                        <?php echo esc_html($sitemap_url); ?>
+                        <span class="dashicons dashicons-external" style="text-decoration: none;"></span>
+                    </a>
+                </p>
+                <p>
+                    <strong>Última Atualização:</strong> 
+                    <?php echo esc_html($last_update); ?>
+                </p>
+            </div>
+
             <h2>Gerar Sitemap</h2>
-            <form method="post" action="<?php echo admin_url('admin-post.php'); ?>">
+            <form method="post" action="<?php echo admin_url('admin-post.php'); ?>" id="generate-form">
                 <?php wp_nonce_field('generate_sitemap_now'); ?>
                 <input type="hidden" name="action" value="generate_sitemap_now">
                 <p>
                     <button type="submit" class="button button-primary" id="generate-sitemap">
+                        <span class="dashicons dashicons-update" style="vertical-align: middle;"></span>
                         Gerar Sitemap Agora
                     </button>
                 </p>
@@ -580,17 +533,31 @@ class Simple_News_Sitemap {
             
             <script>
             jQuery(document).ready(function($) {
-                $('#generate-sitemap').click(function(e) {
+                var isGenerating = false;
+                
+                $('#generate-form').on('submit', function(e) {
                     e.preventDefault();
-                    var $button = $(this);
+                    
+                    if (isGenerating) {
+                        return;
+                    }
+                    
+                    var $button = $('#generate-sitemap');
                     var $log = $('#generation-log');
                     var $logContent = $('#log-content');
                     
-                    $button.prop('disabled', true);
+                    isGenerating = true;
+                    $button.prop('disabled', true)
+                           .find('.dashicons')
+                           .addClass('dashicons-update-spin');
                     $log.show();
                     $logContent.html('Iniciando geração do sitemap...\n');
                     
                     function checkProgress() {
+                        if (!isGenerating) {
+                            return;
+                        }
+                        
                         $.ajax({
                             url: ajaxurl,
                             data: {
@@ -603,21 +570,33 @@ class Simple_News_Sitemap {
                                     setTimeout(checkProgress, 1000);
                                 } else if (response.status === 'complete') {
                                     $logContent.append('Geração concluída!\n');
-                                    $button.prop('disabled', false);
+                                    isGenerating = false;
+                                    $button.prop('disabled', false)
+                                           .find('.dashicons')
+                                           .removeClass('dashicons-update-spin');
                                     window.location.reload();
                                 }
+                            },
+                            error: function() {
+                                isGenerating = false;
+                                $button.prop('disabled', false)
+                                       .find('.dashicons')
+                                       .removeClass('dashicons-update-spin');
+                                $logContent.append('Erro ao verificar progresso\n');
                             }
                         });
                     }
                     
-                    // Iniciar a verificação de progresso
-                    checkProgress();
-                    
-                    // Enviar o formulário via AJAX
-                    $.post($button.closest('form').attr('action'), $button.closest('form').serialize())
+                    $.post($(this).attr('action'), $(this).serialize())
+                        .done(function() {
+                            checkProgress();
+                        })
                         .fail(function() {
+                            isGenerating = false;
+                            $button.prop('disabled', false)
+                                   .find('.dashicons')
+                                   .removeClass('dashicons-update-spin');
                             $logContent.append('Erro ao iniciar a geração do sitemap\n');
-                            $button.prop('disabled', false);
                         });
                 });
             });
@@ -626,12 +605,31 @@ class Simple_News_Sitemap {
         <?php
     }
 
+    private function get_recent_logs() {
+        if (empty($this->options['generation_log'])) {
+            return [];
+        }
+        
+        return array_slice(
+            array_reverse($this->options['generation_log']),
+            0,
+            10
+        );
+    }
+
     private function get_log_contents() {
         if (!file_exists($this->log_file)) {
             return 'Nenhum log disponível.';
         }
         
-        return file_get_contents($this->log_file);
+        $logs = file($this->log_file);
+        if (empty($logs)) {
+            return 'Nenhum log disponível.';
+        }
+        
+        // Retornar as últimas 100 linhas do log
+        $logs = array_slice($logs, -100);
+        return implode('', $logs);
     }
 
     public function clear_sitemap_cache() {
