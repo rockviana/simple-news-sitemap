@@ -38,7 +38,8 @@ class Simple_News_Sitemap {
 
     private function __construct() {
         $this->site_url = get_site_url();
-        $this->sitemap_path = ABSPATH . 'news-sitemap.xml';
+        $upload_dir = wp_upload_dir();
+        $this->sitemap_path = trailingslashit($upload_dir['basedir']) . 'simple-news-sitemap.xml';
         $this->log_file = WP_CONTENT_DIR . '/simple-news-sitemap.log';
         $this->options = get_option('simple_news_sitemap_options', [
             'categories' => [],
@@ -79,6 +80,19 @@ class Simple_News_Sitemap {
     }
 
     public function init() {
+        add_rewrite_rule(
+            'news-sitemap\.xml$',
+            'index.php?simple_news_sitemap=1',
+            'top'
+        );
+        
+        // Adicionar query var
+        add_filter('query_vars', function($vars) {
+            $vars[] = 'simple_news_sitemap';
+            return $vars;
+        });
+
+        // Servir o sitemap
         add_action('template_redirect', [$this, 'serve_sitemap']);
         add_action('pre_get_posts', [$this, 'handle_sitemap_request']);
     }
@@ -98,7 +112,22 @@ class Simple_News_Sitemap {
     public function serve_sitemap() {
         $current_url = $_SERVER['REQUEST_URI'];
         if (strpos($current_url, 'news-sitemap.xml') !== false) {
+            // Verificar se o arquivo existe
+            if (!file_exists($this->sitemap_path)) {
+                $this->log_message("Arquivo do sitemap não encontrado em {$this->sitemap_path}", 'error');
+                status_header(404);
+                exit;
+            }
+
+            // Verificar se o arquivo pode ser lido
+            if (!is_readable($this->sitemap_path)) {
+                $this->log_message("Arquivo do sitemap não pode ser lido em {$this->sitemap_path}", 'error');
+                status_header(403);
+                exit;
+            }
+
             header('Content-Type: application/xml; charset=UTF-8');
+            header('Content-Length: ' . filesize($this->sitemap_path));
             
             // Tentar obter do cache
             $cached_xml = wp_cache_get($this->cache_key, $this->cache_group);
@@ -107,13 +136,8 @@ class Simple_News_Sitemap {
                 exit;
             }
 
-            // Gerar novo XML
-            $xml = $this->generate_sitemap();
-            
-            // Salvar no cache
-            wp_cache_set($this->cache_key, $xml, $this->cache_group, $this->cache_expiration);
-            
-            echo $xml;
+            // Ler e enviar o arquivo
+            readfile($this->sitemap_path);
             exit;
         }
     }
@@ -633,55 +657,43 @@ class Simple_News_Sitemap {
     }
 
     public function clear_sitemap_cache() {
+        // Limpar cache do WordPress
+        wp_cache_delete($this->cache_key, $this->cache_group);
+
+        // Gerar URL do sitemap
         $sitemap_url = home_url('/news-sitemap.xml');
 
-        // Limpar cache do SiteGround
-        if (isset($this->options['enable_siteground']) && $this->options['enable_siteground']) {
-            // Primeiro tenta via WP-CLI
-            if (!defined('WP_CLI') && function_exists('shell_exec') && $this->is_shell_exec_available()) {
-                $command = sprintf('wp sg purge %s 2>&1', escapeshellarg($sitemap_url));
-                $output = shell_exec($command);
-                
-                // Registrar no log
-                $log_message = $output ? "WP-CLI SG Cache: " . trim($output) : "WP-CLI SG Cache: Executado sem saída";
-                $this->add_to_log($log_message);
-            } 
-            // Fallback para o método padrão do SG
-            elseif (function_exists('do_action')) {
-                do_action('sg_cachepress_purge_url', $sitemap_url);
-                $this->add_to_log("Cache SG limpo via action sg_cachepress_purge_url");
-            }
-        }
-
-        // Limpar cache do Cloudflare
-        if (isset($this->options['enable_cloudflare']) && $this->options['enable_cloudflare']) {
+        // Limpar cache do Cloudflare se habilitado
+        if ($this->options['enable_cloudflare']) {
             $this->clear_cloudflare_cache($sitemap_url);
         }
-    }
 
-    private function is_shell_exec_available() {
-        if (function_exists('shell_exec') && !in_array('shell_exec', array_map('trim', explode(',', ini_get('disable_functions'))))) {
-            // Testar se podemos executar wp-cli
-            $test = shell_exec('wp --info 2>&1');
-            return $test !== null && !empty($test) && strpos($test, 'WP-CLI') !== false;
-        }
-        return false;
-    }
-
-    public function add_to_log($message) {
-        // Manter apenas os últimos 50 logs
-        $this->options['generation_log'][] = [
-            'time' => current_time('mysql'),
-            'message' => $message['message'],
-            'count' => $message['count'],
-            'execution_time' => $message['execution_time']
-        ];
-
-        if (count($this->options['generation_log']) > 50) {
-            $this->options['generation_log'] = array_slice($this->options['generation_log'], -50);
+        // Limpar cache do SiteGround se habilitado
+        if ($this->options['enable_siteground'] && $this->is_shell_exec_available()) {
+            shell_exec('sg-cachepress-purge ' . escapeshellarg($sitemap_url));
         }
 
+        // Atualizar timestamp da última atualização
+        $this->options['last_update'] = current_time('mysql');
         update_option('simple_news_sitemap_options', $this->options);
+
+        // Forçar atualização das regras de rewrite
+        flush_rewrite_rules();
+    }
+
+    public function handle_post_status_transition($new_status, $old_status, $post) {
+        // Apenas processar posts
+        if ($post->post_type !== 'post') {
+            return;
+        }
+
+        // Verificar se o status mudou de/para publicado
+        if ($new_status === 'publish' || $old_status === 'publish') {
+            // Agendar geração do sitemap para evitar sobrecarga
+            if (!wp_next_scheduled('generate_news_sitemap')) {
+                wp_schedule_single_event(time() + 60, 'generate_news_sitemap');
+            }
+        }
     }
 
     public function ajax_check_progress() {
@@ -786,20 +798,63 @@ class Simple_News_Sitemap {
     }
 
     private function save_sitemap_file($xml) {
+        // Verificar diretório de upload
+        $upload_dir = wp_upload_dir();
+        if (isset($upload_dir['error']) && $upload_dir['error'] !== false) {
+            $this->log_message("Erro no diretório de upload: " . $upload_dir['error'], 'error');
+            return false;
+        }
+
+        // Garantir que o diretório existe e tem permissões corretas
+        $sitemap_dir = dirname($this->sitemap_path);
+        if (!file_exists($sitemap_dir)) {
+            wp_mkdir_p($sitemap_dir);
+        }
+
+        // Verificar permissões
+        if (!is_writable($sitemap_dir)) {
+            $this->log_message("Diretório {$sitemap_dir} não tem permissão de escrita", 'error');
+            return false;
+        }
+
+        // Criar arquivo temporário no mesmo diretório
         $temp_file = $this->sitemap_path . '.tmp';
         
+        // Tentar escrever o arquivo temporário
         if (file_put_contents($temp_file, $xml) === false) {
-            $this->log_message("Erro ao escrever arquivo temporário do sitemap", 'error');
+            $this->log_message("Erro ao escrever arquivo temporário do sitemap em {$temp_file}", 'error');
             return false;
         }
-        
+
+        // Verificar se o arquivo temporário foi criado
+        if (!file_exists($temp_file)) {
+            $this->log_message("Arquivo temporário não foi criado em {$temp_file}", 'error');
+            return false;
+        }
+
+        // Se existir um sitemap antigo, tentar removê-lo
+        if (file_exists($this->sitemap_path)) {
+            if (!unlink($this->sitemap_path)) {
+                $this->log_message("Não foi possível remover o sitemap antigo em {$this->sitemap_path}", 'error');
+                unlink($temp_file); // Limpar arquivo temporário
+                return false;
+            }
+        }
+
+        // Renomear arquivo temporário
         if (!rename($temp_file, $this->sitemap_path)) {
-            unlink($temp_file);
-            $this->log_message("Erro ao renomear arquivo temporário do sitemap", 'error');
+            $this->log_message("Erro ao renomear arquivo temporário de {$temp_file} para {$this->sitemap_path}", 'error');
+            unlink($temp_file); // Limpar arquivo temporário
             return false;
         }
-        
-        $this->log_message("Arquivo do sitemap salvo com sucesso");
+
+        // Verificar se o arquivo final existe
+        if (!file_exists($this->sitemap_path)) {
+            $this->log_message("Arquivo final não existe em {$this->sitemap_path}", 'error');
+            return false;
+        }
+
+        $this->log_message("Arquivo do sitemap salvo com sucesso em {$this->sitemap_path}");
         return true;
     }
 
@@ -834,6 +889,31 @@ class Simple_News_Sitemap {
                       : "Erro ao limpar cache do Cloudflare: " . json_encode($body['errors'] ?? []);
             $this->add_to_log($message);
         }
+    }
+
+    public function add_to_log($message) {
+        // Manter apenas os últimos 50 logs
+        $this->options['generation_log'][] = [
+            'time' => current_time('mysql'),
+            'message' => $message['message'],
+            'count' => $message['count'],
+            'execution_time' => $message['execution_time']
+        ];
+
+        if (count($this->options['generation_log']) > 50) {
+            $this->options['generation_log'] = array_slice($this->options['generation_log'], -50);
+        }
+
+        update_option('simple_news_sitemap_options', $this->options);
+    }
+
+    private function is_shell_exec_available() {
+        if (function_exists('shell_exec') && !in_array('shell_exec', array_map('trim', explode(',', ini_get('disable_functions'))))) {
+            // Testar se podemos executar wp-cli
+            $test = shell_exec('wp --info 2>&1');
+            return $test !== null && !empty($test) && strpos($test, 'WP-CLI') !== false;
+        }
+        return false;
     }
 }
 
