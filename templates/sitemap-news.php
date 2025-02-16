@@ -3,30 +3,19 @@
  * News Sitemap Template
  */
 
-// Evitar acesso direto
 if (!defined('ABSPATH')) {
     exit;
 }
-
-// Debug
-error_log('Simple News Sitemap: Template loaded');
-error_log('Simple News Sitemap: Found ' . count($posts) . ' posts');
 
 echo '<?xml version="1.0" encoding="UTF-8"?>' . PHP_EOL;
 ?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:news="http://www.google.com/schemas/sitemap-news/0.9">
 <?php
 if ($posts && count($posts) > 0) :
     foreach ($posts as $post) :
-        // Debug
-        error_log('Simple News Sitemap: Processing post ' . $post->ID);
+        setup_postdata($post);
         
         // Pular posts excluídos
-        if (simple_news_sitemap_is_post_excluded($post)) {
-            error_log('Simple News Sitemap: Post ' . $post->ID . ' excluded');
-            continue;
-        }
-
-        setup_postdata($post);
+        if (simple_news_sitemap_is_post_excluded($post)) continue;
 ?>
 <url>
     <loc><?php echo esc_url(get_permalink()); ?></loc>
@@ -41,11 +30,7 @@ if ($posts && count($posts) > 0) :
 </url>
 <?php 
     endforeach;
-else:
-    error_log('Simple News Sitemap: No posts found');
 endif;
 wp_reset_postdata();
 ?>
-</urlset><?php 
-error_log('Simple News Sitemap: Template finished');
-exit; ?>
+</urlset><?php exit; ?>
