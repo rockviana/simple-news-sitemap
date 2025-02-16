@@ -1,22 +1,51 @@
 <?php
-/**
- * Plugin Name: Simple News Sitemap
- * Plugin URI: https://crivo.tech
- * Description: Um plugin WordPress que gera automaticamente um Sitemap de Notícias, compatível com Google News, sem sobrecarga de recursos.
- * Version: 1.0.0
- * Author: Roque Viana
- * Author URI: https://crivo.tech
- * License: GPL v2 or later
- * License URI: https://www.gnu.org/licenses/gpl-2.0.html
- * Text Domain: simple-news-sitemap
- * Domain Path: /languages
- * Requires at least: 6.0
- * Requires PHP: 7.0
- */
-
+// Evitar acesso direto
 if (!defined('ABSPATH')) {
     exit;
 }
+
+// Incluir cabeçalho do plugin
+require_once plugin_dir_path(__FILE__) . 'header.php';
+
+// Carregar ativador
+require_once plugin_dir_path(__FILE__) . 'includes/activator.php';
+
+// Registrar ativação
+register_activation_hook(__FILE__, ['Simple_News_Sitemap_Activator', 'activate']);
+
+// Registrar desativação
+register_deactivation_hook(__FILE__, function() {
+    // Remover schedule de limpeza
+    wp_clear_scheduled_hook('simple_news_sitemap_cleanup');
+    
+    // Limpar regras de rewrite
+    flush_rewrite_rules();
+});
+
+// Registrar desinstalação
+register_uninstall_hook(__FILE__, function() {
+    // Remover opções
+    delete_option('simple_news_sitemap_options');
+    
+    // Remover arquivo de log
+    $log_file = WP_CONTENT_DIR . '/simple-news-sitemap.log';
+    if (file_exists($log_file)) {
+        unlink($log_file);
+    }
+    
+    // Remover sitemap
+    $upload_dir = wp_upload_dir();
+    $sitemap_file = trailingslashit($upload_dir['basedir']) . 'news-sitemap.xml';
+    if (file_exists($sitemap_file)) {
+        unlink($sitemap_file);
+    }
+    
+    // Limpar cache
+    wp_cache_delete('simple_news_sitemap_xml_cache', 'simple_news_sitemap');
+    
+    // Limpar regras de rewrite
+    flush_rewrite_rules();
+});
 
 class Simple_News_Sitemap {
     private static $instance = null;
@@ -61,23 +90,96 @@ class Simple_News_Sitemap {
     }
 
     private function __construct() {
-        $this->site_url = get_site_url();
-        $upload_dir = wp_upload_dir();
-        $this->sitemap_path = trailingslashit($upload_dir['basedir']) . $this->default_options['sitemap_name'];
-        $this->log_file = WP_CONTENT_DIR . '/simple-news-sitemap.log';
-        $this->options = wp_parse_args(
-            get_option('simple_news_sitemap_options', []),
-            $this->default_options
-        );
-
-        // Inicializar cache com suporte a object cache
-        if (wp_using_ext_object_cache()) {
-            wp_cache_add_global_groups($this->cache_group);
-        } else {
-            wp_cache_add_non_persistent_groups($this->cache_group);
+        try {
+            // Definir caminhos base
+            $this->site_url = get_site_url();
+            $upload_dir = wp_upload_dir();
+            
+            // Verificar se wp_upload_dir() retornou erro
+            if (!empty($upload_dir['error'])) {
+                throw new Exception('Erro no diretório de upload: ' . $upload_dir['error']);
+            }
+            
+            // Criar diretório de uploads se não existir
+            if (!file_exists($upload_dir['basedir'])) {
+                $created = wp_mkdir_p($upload_dir['basedir']);
+                if (!$created) {
+                    throw new Exception('Não foi possível criar o diretório de uploads');
+                }
+            }
+            
+            // Verificar permissões do diretório de uploads
+            if (!is_writable($upload_dir['basedir'])) {
+                throw new Exception('O diretório de uploads não tem permissão de escrita');
+            }
+            
+            $this->sitemap_path = trailingslashit($upload_dir['basedir']) . $this->default_options['sitemap_name'];
+            $this->log_file = WP_CONTENT_DIR . '/simple-news-sitemap.log';
+            
+            // Verificar permissões do diretório WP_CONTENT_DIR
+            if (!is_writable(WP_CONTENT_DIR)) {
+                throw new Exception('O diretório wp-content não tem permissão de escrita');
+            }
+            
+            // Criar diretório de assets se não existir
+            $plugin_dir = plugin_dir_path(__FILE__);
+            $js_dir = $plugin_dir . 'js';
+            $css_dir = $plugin_dir . 'css';
+            
+            foreach ([$js_dir, $css_dir] as $dir) {
+                if (!file_exists($dir)) {
+                    $created = wp_mkdir_p($dir);
+                    if (!$created) {
+                        throw new Exception('Não foi possível criar o diretório: ' . $dir);
+                    }
+                }
+                if (!is_writable($dir)) {
+                    throw new Exception('O diretório não tem permissão de escrita: ' . $dir);
+                }
+            }
+            
+            // Inicializar opções com merge seguro
+            $saved_options = get_option('simple_news_sitemap_options', []);
+            $this->options = wp_parse_args($saved_options, $this->default_options);
+            
+            // Garantir que arrays existam e sejam do tipo correto
+            $this->options['categories'] = isset($this->options['categories']) ? (array)$this->options['categories'] : [];
+            $this->options['ping_services'] = isset($this->options['ping_services']) ? (array)$this->options['ping_services'] : [];
+            $this->options['generation_log'] = isset($this->options['generation_log']) ? (array)$this->options['generation_log'] : [];
+            
+            // Validar valores numéricos
+            $this->options['max_news'] = absint($this->options['max_news']);
+            if ($this->options['max_news'] < 1 || $this->options['max_news'] > 1000) {
+                $this->options['max_news'] = 50;
+            }
+            
+            $this->options['base_priority'] = (float)$this->options['base_priority'];
+            if ($this->options['base_priority'] < 0.1 || $this->options['base_priority'] > 1.0) {
+                $this->options['base_priority'] = 0.7;
+            }
+            
+            // Inicializar cache com suporte a object cache
+            if (wp_using_ext_object_cache()) {
+                wp_cache_add_global_groups($this->cache_group);
+            } else {
+                wp_cache_add_non_persistent_groups($this->cache_group);
+            }
+            
+            $this->init_hooks();
+            
+        } catch (Exception $e) {
+            // Registrar erro no log do WordPress
+            error_log('Simple News Sitemap - Erro na inicialização: ' . $e->getMessage());
+            
+            // Se estiver no admin, mostrar notificação
+            if (is_admin()) {
+                add_action('admin_notices', function() use ($e) {
+                    echo '<div class="notice notice-error"><p>';
+                    echo 'Simple News Sitemap - Erro na inicialização: ' . esc_html($e->getMessage());
+                    echo '</p></div>';
+                });
+            }
         }
-
-        $this->init_hooks();
     }
 
     private function init_hooks() {
@@ -107,20 +209,27 @@ class Simple_News_Sitemap {
     }
 
     public function init() {
-        // Adicionar regra de rewrite com prioridade alta
-        add_rewrite_rule(
-            '^' . $this->options['sitemap_name'] . '$',
-            'index.php?simple_news_sitemap=1',
-            'top'
-        );
-        
-        add_filter('query_vars', function($vars) {
-            $vars[] = 'simple_news_sitemap';
-            return $vars;
-        });
+        try {
+            // Adicionar regra de rewrite com prioridade alta
+            add_rewrite_rule(
+                '^' . preg_quote($this->options['sitemap_name']) . '$',
+                'index.php?simple_news_sitemap=1',
+                'top'
+            );
+            
+            add_filter('query_vars', function($vars) {
+                $vars[] = 'simple_news_sitemap';
+                return $vars;
+            });
 
-        add_action('template_redirect', [$this, 'serve_sitemap']);
-        add_action('pre_get_posts', [$this, 'handle_sitemap_request']);
+            add_action('template_redirect', [$this, 'serve_sitemap']);
+            add_action('pre_get_posts', [$this, 'handle_sitemap_request']);
+            
+        } catch (Exception $e) {
+            if ($this->options['debug_mode']) {
+                error_log('Simple News Sitemap - Erro na inicialização: ' . $e->getMessage());
+            }
+        }
     }
 
     public function generate_sitemap() {
@@ -593,11 +702,40 @@ class Simple_News_Sitemap {
     }
 
     public function enqueue_admin_scripts($hook) {
-        if ('settings_page_simple-news-sitemap' !== $hook) {
+        if ($hook !== 'settings_page_simple-news-sitemap') {
             return;
         }
 
-        wp_enqueue_script('jquery');
+        $plugin_url = plugin_dir_url(__FILE__);
+        $version = '1.0.0';
+
+        // Verificar se os arquivos existem antes de registrar
+        $js_file = plugin_dir_path(__FILE__) . 'js/admin.js';
+        $css_file = plugin_dir_path(__FILE__) . 'css/admin.css';
+
+        if (file_exists($js_file)) {
+            wp_enqueue_script(
+                'simple-news-sitemap-admin',
+                $plugin_url . 'js/admin.js',
+                ['jquery'],
+                $version,
+                true
+            );
+
+            wp_localize_script('simple-news-sitemap-admin', 'simpleNewsSitemap', [
+                'ajax_url' => admin_url('admin-ajax.php'),
+                'nonce' => wp_create_nonce('simple_news_sitemap_progress')
+            ]);
+        }
+
+        if (file_exists($css_file)) {
+            wp_enqueue_style(
+                'simple-news-sitemap-admin',
+                $plugin_url . 'css/admin.css',
+                [],
+                $version
+            );
+        }
     }
 
     public function add_exclude_meta_box() {
