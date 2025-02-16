@@ -11,12 +11,12 @@ if (!defined('ABSPATH')) {
 echo '<?xml version="1.0" encoding="UTF-8"?>' . PHP_EOL;
 ?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:news="http://www.google.com/schemas/sitemap-news/0.9">
 <?php
-if (have_posts()) :
-    while (have_posts()) : 
-        the_post();
-        
+if ($posts && count($posts) > 0) :
+    foreach ($posts as $post) :
         // Pular posts excluídos
-        if (GoogleNewsSitemapGenerator::get_instance()->is_post_excluded($post)) continue;
+        if (simple_news_sitemap_is_post_excluded($post)) continue;
+
+        setup_postdata($post);
 ?>
 <url>
     <loc><?php echo esc_url(get_permalink()); ?></loc>
@@ -30,7 +30,7 @@ if (have_posts()) :
     </news:news>
 </url>
 <?php 
-    endwhile;
+    endforeach;
 endif;
 wp_reset_postdata();
 ?>
