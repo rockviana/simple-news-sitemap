@@ -16,8 +16,6 @@ if (!defined('ABSPATH')) {
 
 class Simple_News_Sitemap {
     private static $instance = null;
-    private $sitemap_path;
-    private $site_url;
     private $max_news = 1000;
     private $cache_group = 'simple_news_sitemap';
 
@@ -29,10 +27,6 @@ class Simple_News_Sitemap {
     }
 
     private function __construct() {
-        $this->site_url = get_site_url();
-        $upload_dir = wp_upload_dir();
-        $this->sitemap_path = trailingslashit($upload_dir['basedir']) . 'news-sitemap.xml';
-        
         // Inicializar cache
         if (wp_using_ext_object_cache()) {
             wp_cache_add_global_groups($this->cache_group);
@@ -42,54 +36,29 @@ class Simple_News_Sitemap {
     }
 
     private function init_hooks() {
-        // Hooks para atualização do sitemap
-        add_action('save_post', [$this, 'update_sitemap'], 10, 2);
-        add_action('delete_post', [$this, 'update_sitemap']);
-        add_action('trash_post', [$this, 'update_sitemap']);
-        add_action('untrash_post', [$this, 'update_sitemap']);
+        // Adicionar regra de rewrite
+        add_action('init', [$this, 'add_feed']);
         
-        // Rewrite rule para o sitemap
-        add_action('init', [$this, 'add_sitemap_rewrite']);
-        add_filter('query_vars', [$this, 'add_sitemap_query_var']);
-        add_action('template_redirect', [$this, 'serve_sitemap']);
+        // Hooks para limpar cache
+        add_action('save_post', [$this, 'clear_cache'], 10, 2);
+        add_action('delete_post', [$this, 'clear_cache']);
+        add_action('trash_post', [$this, 'clear_cache']);
+        add_action('untrash_post', [$this, 'clear_cache']);
+    }
+
+    public function add_feed() {
+        add_feed('news-sitemap', [$this, 'generate_sitemap']);
         
-        // Gerar sitemap inicial se não existir
-        add_action('init', [$this, 'maybe_generate_sitemap']);
+        // Registrar regra de rewrite para news-sitemap.xml
+        add_rewrite_rule(
+            '^news-sitemap\.xml$',
+            'index.php?feed=news-sitemap',
+            'top'
+        );
     }
 
-    public function add_sitemap_rewrite() {
-        add_rewrite_rule('^news-sitemap\.xml$', 'index.php?simple_news_sitemap=1', 'top');
-    }
-
-    public function add_sitemap_query_var($vars) {
-        $vars[] = 'simple_news_sitemap';
-        return $vars;
-    }
-
-    public function serve_sitemap() {
-        if (get_query_var('simple_news_sitemap')) {
-            header('Content-Type: application/xml; charset=UTF-8');
-            readfile($this->sitemap_path);
-            exit;
-        }
-    }
-
-    public function maybe_generate_sitemap() {
-        if (!file_exists($this->sitemap_path)) {
-            $this->generate_sitemap();
-        }
-    }
-
-    public function update_sitemap($post_id, $post = null) {
-        if (defined('DOING_AUTOSAVE') && DOING_AUTOSAVE) {
-            return;
-        }
-
-        if ($post && 'publish' !== $post->post_status) {
-            return;
-        }
-
-        $this->generate_sitemap();
+    public function clear_cache() {
+        wp_cache_delete('news_posts', $this->cache_group);
     }
 
     private function get_news_posts() {
@@ -106,67 +75,54 @@ class Simple_News_Sitemap {
                 'no_found_rows' => true,
                 'update_post_term_cache' => false,
                 'update_post_meta_cache' => false,
+                'date_query' => [
+                    [
+                        'after' => '48 hours ago',
+                        'inclusive' => true,
+                    ],
+                ],
             ];
             
             $query = new WP_Query($args);
             $posts = $query->posts;
             
-            wp_cache_set($cache_key, $posts, $this->cache_group, 300); // Cache por 5 minutos
+            wp_cache_set($cache_key, $posts, $this->cache_group, 300);
         }
         
         return $posts;
     }
 
-    private function generate_sitemap() {
+    public function generate_sitemap() {
+        // Desabilitar cache
+        header('Cache-Control: no-cache, no-store, must-revalidate');
+        header('Pragma: no-cache');
+        header('Expires: 0');
+        header('Content-Type: application/xml; charset=UTF-8');
+        
+        // Iniciar XML
+        echo '<?xml version="1.0" encoding="UTF-8"?>' . PHP_EOL;
+        echo '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:news="http://www.google.com/schemas/sitemap-news/0.9">' . PHP_EOL;
+        
         $posts = $this->get_news_posts();
         
-        $xml = new DOMDocument('1.0', 'UTF-8');
-        $xml->formatOutput = true;
-        
-        $urlset = $xml->createElement('urlset');
-        $urlset->setAttribute('xmlns', 'http://www.sitemaps.org/schemas/sitemap/0.9');
-        $urlset->setAttribute('xmlns:news', 'http://www.google.com/schemas/sitemap-news/0.9');
-        $xml->appendChild($urlset);
-        
         foreach ($posts as $post) {
-            $url = $xml->createElement('url');
-            
-            // Loc
-            $loc = $xml->createElement('loc', esc_url(get_permalink($post)));
-            $url->appendChild($loc);
-            
-            // News tags
-            $news = $xml->createElement('news:news');
-            
-            // Publication
-            $publication = $xml->createElement('news:publication');
-            $name = $xml->createElement('news:name', esc_html(get_bloginfo('name')));
-            $lang = $xml->createElement('news:language', substr(get_locale(), 0, 2));
-            $publication->appendChild($name);
-            $publication->appendChild($lang);
-            $news->appendChild($publication);
-            
-            // Publication Date
-            $pub_date = $xml->createElement('news:publication_date', get_the_date('c', $post));
-            $news->appendChild($pub_date);
-            
-            // Title
-            $title = $xml->createElement('news:title', esc_html($post->post_title));
-            $news->appendChild($title);
-            
-            $url->appendChild($news);
-            $urlset->appendChild($url);
+            echo '<url>' . PHP_EOL;
+            echo '  <loc>' . esc_url(get_permalink($post)) . '</loc>' . PHP_EOL;
+            echo '  <news:news>' . PHP_EOL;
+            echo '    <news:publication>' . PHP_EOL;
+            echo '      <news:name>' . esc_xml(get_bloginfo('name')) . '</news:name>' . PHP_EOL;
+            echo '      <news:language>' . esc_xml(substr(get_locale(), 0, 2)) . '</news:language>' . PHP_EOL;
+            echo '    </news:publication>' . PHP_EOL;
+            echo '    <news:publication_date>' . esc_xml(get_the_date('c', $post)) . '</news:publication_date>' . PHP_EOL;
+            echo '    <news:title>' . esc_xml($post->post_title) . '</news:title>' . PHP_EOL;
+            echo '  </news:news>' . PHP_EOL;
+            echo '</url>' . PHP_EOL;
         }
         
-        // Salvar sitemap atomicamente
-        $temp_file = $this->sitemap_path . '.tmp';
-        $xml->save($temp_file);
-        rename($temp_file, $this->sitemap_path);
-        
-        // Limpar cache
-        wp_cache_delete('news_posts', $this->cache_group);
+        echo '</urlset>';
+        exit;
     }
 }
 
 // Inicializar plugin
-add_action('plugins_loaded', ['Simple_News_Sitemap', 'get_instance']);
+add_action('init', ['Simple_News_Sitemap', 'get_instance']);
