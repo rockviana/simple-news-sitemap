@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Simple News Sitemap
  * Plugin URI: https://crivo.tech
- * Description: Gerador de sitemap otimizado para Google News, sem conflitos com outros plugins de SEO
+ * Description: Gerador de sitemap otimizado para Google News, compatível com outros plugins de SEO
  * Version: 1.0.0
  * Author: Roque Viana
  * Author URI: https://crivo.tech
@@ -18,7 +18,7 @@ class GoogleNewsSitemapGenerator {
     private static $instance = null;
     private $lastPostModified = 0;
 
-    const SITEMAP_SCOPE = 'news';
+    const SITEMAP_SCOPE = 'news-sitemap';
 
     public static function get_instance() {
         if (null === self::$instance) {
@@ -28,16 +28,19 @@ class GoogleNewsSitemapGenerator {
     }
 
     private function __construct() {
+        // Hooks principais
         add_action('init', array($this, 'init'), 0);
         add_action('pre_get_posts', array($this, 'filter_news_posts'));
         add_action('publish_post', array($this, 'track_modified_posts'));
         add_action('transition_post_status', array($this, 'track_post_status'), 10, 3);
         
+        // Hooks de ativação/desativação
         register_activation_hook(__FILE__, array($this, 'activate'));
         register_deactivation_hook(__FILE__, array($this, 'deactivate'));
     }
 
     public function init() {
+        // Registrar feed personalizado para o sitemap de notícias
         add_feed(self::SITEMAP_SCOPE, array($this, 'render_sitemap'));
         $this->add_rewrite_rules();
     }
@@ -55,8 +58,10 @@ class GoogleNewsSitemapGenerator {
 
     private function add_rewrite_rules() {
         global $wp_rewrite;
+        
+        // Usar um endpoint diferente para evitar conflitos
         add_rewrite_rule(
-            'sitemap-' . self::SITEMAP_SCOPE . '\.xml$',
+            'news-sitemap\.xml$',
             'index.php?feed=' . self::SITEMAP_SCOPE,
             'top'
         );
@@ -78,6 +83,7 @@ class GoogleNewsSitemapGenerator {
 
     public function filter_news_posts($query) {
         if ($query->is_feed(self::SITEMAP_SCOPE)) {
+            // Filtrar apenas posts das últimas 48 horas
             $query->set('post_type', 'post');
             $query->set('posts_per_page', 1000);
             $query->set('orderby', 'modified');
@@ -115,7 +121,7 @@ class GoogleNewsSitemapGenerator {
     }
 
     public function is_post_excluded($post) {
-        // Posts excluídos por padrão (customize conforme necessário)
+        // Posts excluídos por padrão
         $excluded_types = array('nav_menu_item', 'revision', 'attachment');
         if (in_array($post->post_type, $excluded_types)) return true;
 
@@ -124,7 +130,7 @@ class GoogleNewsSitemapGenerator {
     }
 
     public function get_sitemap_url() {
-        return home_url('/sitemap-' . self::SITEMAP_SCOPE . '.xml');
+        return home_url('/news-sitemap.xml');
     }
 }
 
