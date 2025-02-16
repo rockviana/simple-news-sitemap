@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Simple News Sitemap
  * Plugin URI: https://crivo.tech
- * Description: Gerador otimizado de sitemap para Google News
+ * Description: Gerador de sitemap otimizado para Google News, sem conflitos com outros plugins de SEO
  * Version: 1.0.0
  * Author: Roque Viana
  * Author URI: https://crivo.tech
@@ -14,68 +14,119 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-// Registrar o feed do sitemap
-add_action('init', function() {
-    add_feed('sitemap-news', 'simple_news_sitemap_generate');
-});
+class GoogleNewsSitemapGenerator {
+    private static $instance = null;
+    private $lastPostModified = 0;
 
-// Adicionar regra de rewrite
-add_action('init', function() {
-    add_rewrite_rule(
-        '^sitemap-news\.xml$',
-        'index.php?feed=sitemap-news',
-        'top'
-    );
-});
+    const SITEMAP_SCOPE = 'news';
 
-// Função para gerar o sitemap
-function simple_news_sitemap_generate() {
-    // Desabilitar cache
-    header('Content-Type: application/xml; charset=UTF-8');
-    header('Cache-Control: no-cache, no-store, must-revalidate, private');
-    header('Pragma: no-cache');
-    header('Expires: 0');
-
-    // Consultar posts
-    $args = array(
-        'post_type' => 'post',
-        'post_status' => 'publish',
-        'posts_per_page' => 1000,
-        'orderby' => 'date',
-        'order' => 'DESC',
-        'no_found_rows' => true,
-        'update_post_term_cache' => false,
-        'update_post_meta_cache' => false,
-        'date_query' => array(
-            array(
-                'after' => '48 hours ago',
-                'inclusive' => true,
-            ),
-        ),
-    );
-
-    $query = new WP_Query($args);
-
-    // Gerar XML
-    echo '<?xml version="1.0" encoding="UTF-8"?>' . PHP_EOL;
-    echo '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:news="http://www.google.com/schemas/sitemap-news/0.9">' . PHP_EOL;
-
-    while ($query->have_posts()) {
-        $query->the_post();
-        echo '<url>' . PHP_EOL;
-        echo '  <loc>' . esc_url(get_permalink()) . '</loc>' . PHP_EOL;
-        echo '  <news:news>' . PHP_EOL;
-        echo '    <news:publication>' . PHP_EOL;
-        echo '      <news:name>' . esc_xml(get_bloginfo('name')) . '</news:name>' . PHP_EOL;
-        echo '      <news:language>' . esc_xml(substr(get_locale(), 0, 2)) . '</news:language>' . PHP_EOL;
-        echo '    </news:publication>' . PHP_EOL;
-        echo '    <news:publication_date>' . esc_xml(get_the_date('c')) . '</news:publication_date>' . PHP_EOL;
-        echo '    <news:title>' . esc_xml(get_the_title()) . '</news:title>' . PHP_EOL;
-        echo '  </news:news>' . PHP_EOL;
-        echo '</url>' . PHP_EOL;
+    public static function get_instance() {
+        if (null === self::$instance) {
+            self::$instance = new self();
+        }
+        return self::$instance;
     }
 
-    wp_reset_postdata();
-    echo '</urlset>';
-    exit;
+    private function __construct() {
+        add_action('init', array($this, 'init'), 0);
+        add_action('pre_get_posts', array($this, 'filter_news_posts'));
+        add_action('publish_post', array($this, 'track_modified_posts'));
+        add_action('transition_post_status', array($this, 'track_post_status'), 10, 3);
+        
+        register_activation_hook(__FILE__, array($this, 'activate'));
+        register_deactivation_hook(__FILE__, array($this, 'deactivate'));
+    }
+
+    public function init() {
+        add_feed(self::SITEMAP_SCOPE, array($this, 'render_sitemap'));
+        $this->add_rewrite_rules();
+    }
+
+    public function activate() {
+        $this->add_rewrite_rules();
+        flush_rewrite_rules();
+        update_option('simple_news_sitemap_version', '1.0.0');
+    }
+
+    public function deactivate() {
+        flush_rewrite_rules();
+        delete_option('simple_news_sitemap_version');
+    }
+
+    private function add_rewrite_rules() {
+        global $wp_rewrite;
+        add_rewrite_rule(
+            'sitemap-' . self::SITEMAP_SCOPE . '\.xml$',
+            'index.php?feed=' . self::SITEMAP_SCOPE,
+            'top'
+        );
+    }
+
+    public function track_modified_posts($post_id) {
+        $post = get_post($post_id);
+        if ($post && $post->post_type == 'post') {
+            $modified = strtotime($post->post_modified_gmt);
+            $this->lastPostModified = max($this->lastPostModified, $modified);
+        }
+    }
+
+    public function track_post_status($new_status, $old_status, $post) {
+        if ($post->post_type == 'post') {
+            $this->track_modified_posts($post->ID);
+        }
+    }
+
+    public function filter_news_posts($query) {
+        if ($query->is_feed(self::SITEMAP_SCOPE)) {
+            $query->set('post_type', 'post');
+            $query->set('posts_per_page', 1000);
+            $query->set('orderby', 'modified');
+            $query->set('order', 'DESC');
+            $query->set('date_query', array(
+                array(
+                    'after' => '48 hours ago',
+                    'inclusive' => true,
+                )
+            ));
+            
+            // Otimizações de performance
+            $query->set('no_found_rows', true);
+            $query->set('update_post_term_cache', false);
+            $query->set('update_post_meta_cache', false);
+        }
+    }
+
+    public function render_sitemap() {
+        global $wp_query;
+
+        // Headers
+        header('Content-Type: application/xml; charset=' . get_bloginfo('charset'));
+        header('X-Robots-Tag: noindex, follow');
+
+        // Cache control
+        $expires = 3600;
+        header('Cache-Control: maxage=' . $expires);
+        header('Expires: ' . gmdate('D, d M Y H:i:s', time() + $expires) . ' GMT');
+        header('Last-Modified: ' . gmdate('D, d M Y H:i:s', $this->lastPostModified) . ' GMT');
+
+        // Carregar template
+        require_once dirname(__FILE__) . '/templates/sitemap-news.php';
+        exit;
+    }
+
+    public function is_post_excluded($post) {
+        // Posts excluídos por padrão (customize conforme necessário)
+        $excluded_types = array('nav_menu_item', 'revision', 'attachment');
+        if (in_array($post->post_type, $excluded_types)) return true;
+
+        // Permitir filtro de exclusão
+        return apply_filters('simple_news_sitemap_exclude_post', false, $post);
+    }
+
+    public function get_sitemap_url() {
+        return home_url('/sitemap-' . self::SITEMAP_SCOPE . '.xml');
+    }
 }
+
+// Inicializar
+GoogleNewsSitemapGenerator::get_instance();
